@@ -39,15 +39,13 @@ Built for amateur radio operators, satellite enthusiasts, and educators. Shows r
 
 ## Installation
 
-1. Clone or download the repository:
-```bash
-git clone https://github.com/PRStoetzer/PaperSat.git
+1. Clone or download the repository
 2. Open PaperSat.ino in the Arduino IDE
 3. Select Tools → Board → M5Stack → M5PaperS3
 4. Choose the correct USB port
 5. Upload the sketch (long-press the power button on the M5Paper S3 if it doesn’t enter download mode automatically)  
 
-## First Boot & Setup  
+## First Boot and Setup
 
 1. After uploading, tap the Setup button on the main screen  
 2. Connect your phone or computer to the WiFi network: M5PaperS3-Setup  
@@ -58,14 +56,17 @@ git clone https://github.com/PRStoetzer/PaperSat.git
 7. The display will now auto-update every 30 seconds  
 
 ## Author
+
 Paul Stoetzer, N8HM  
 Executive Vice President  
 AMSAT  
 
 ## License
+
 This project is licensed under the MIT License — see the LICENSE file for details.  
 
 ## Acknowledgments  
+
 • Celestrak for public TLE data  
 • SGP4 algorithm by Dr. T.S. Kelso  
 • M5Stack hardware and libraries  
