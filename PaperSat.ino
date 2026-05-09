@@ -246,9 +246,18 @@ void drawMainScreen() {
     drawSatelliteIcon(px, py, 18);
   }
 
-  char pos[60];
-  sprintf(pos, "Az: %.1f%c   El: %.1f%c", sat.satAz, 0xB0, sat.satEl, 0xB0);
-  M5.Display.drawString(pos, 20, 510);
+  // Azimuth + Elevation with proper degree symbol
+  char buf[32];
+  sprintf(buf, "Az: %.1f", sat.satAz);
+  M5.Display.drawString(buf, 20, 510);
+  int x = 20 + M5.Display.textWidth(buf);
+  M5.Display.drawString("\xB0", x, 510);
+
+  sprintf(buf, "   El: %.1f", sat.satEl);
+  x = x + M5.Display.textWidth("\xB0") + 6;
+  M5.Display.drawString(buf, x, 510);
+  x = x + M5.Display.textWidth(buf);
+  M5.Display.drawString("\xB0", x, 510);
 
   // Next 3 Passes - Lower Right
   M5.Display.setTextSize(2);
@@ -258,9 +267,11 @@ void drawMainScreen() {
     struct tm *aos = gmtime(&passes[i].aos);
     struct tm *los = gmtime(&passes[i].los);
     char line[80];
-    sprintf(line, "%02d:%02d -> %02d:%02d  %.1f%c", 
-            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl, 0xB0);
+    sprintf(line, "%02d:%02d -> %02d:%02d  %.1f", 
+            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
     M5.Display.drawString(line, 620, 380 + i*38);
+    int px = 620 + M5.Display.textWidth(line);
+    M5.Display.drawString("\xB0", px, 380 + i*38);
   }
 
   if (lastTLEFetch > 0) {
@@ -291,7 +302,7 @@ void drawMainScreen() {
   M5.Display.display();
 }
 
-// ====================== OTHER SCREENS (unchanged) ======================
+// ====================== OTHER SCREENS ======================
 void drawSatSelectScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
