@@ -163,13 +163,19 @@ void predictPasses() {
   passCount = 0;
   passinfo p;
   sat.initpredpoint((unsigned long)time(nullptr), 0);
+
   while (passCount < 8) {
     if (sat.nextpass(&p, 20, false, 5.0)) {
-      passes[passCount].aos   = jdToUnix(p.jdstart);
-      passes[passCount].los   = jdToUnix(p.jdstop);
-      passes[passCount].maxEl = p.maxelevation;
-      passCount++;
-    } else break;
+      // Only accept real passes (at least ~60 seconds long)
+      if (p.jdstop > p.jdstart + (60.0 / 86400.0)) {
+        passes[passCount].aos   = jdToUnix(p.jdstart);
+        passes[passCount].los   = jdToUnix(p.jdstop);
+        passes[passCount].maxEl = p.maxelevation;
+        passCount++;
+      }
+    } else {
+      break;
+    }
   }
 }
 
@@ -259,7 +265,7 @@ void drawMainScreen() {
   drawDegreeSymbol(x, 510);
 
   sprintf(buf, "   El: %.1f", sat.satEl);
-  x = x + 14; // space after degree circle
+  x = x + 14;
   M5.Display.drawString(buf, x, 510);
   x = x + M5.Display.textWidth(buf);
   drawDegreeSymbol(x, 510);
