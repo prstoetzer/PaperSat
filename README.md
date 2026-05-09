@@ -1,74 +1,75 @@
-# PaperSat - M5Paper S3 Satellite Tracker
+# PaperSat
 
-**A standalone, touch-first satellite tracking application for the M5Paper S3 e-ink tablet.**
-
-Built for amateur radio operators, satellite enthusiasts, and educators. Shows real-time satellite position on a polar sky map, predicts upcoming passes, and supports **any satellite** in the Celestrak database.
+**PaperSat** is a satellite tracking application for the **M5Paper S3** e-ink device. It displays real-time satellite position on a polar sky plot, shows upcoming passes, and allows full on-device configuration.
 
 ## Features
 
-- Full touch UI — no physical buttons required
-- On-device setup via WiFi captive portal:
-- Maidenhead grid square (preferred) **or** manual latitude/longitude
-- Any NORAD catalog number
-- Quick-select menu for popular satellites
-- Real-time sky radar plot (polar view with current satellite position)
-- Next 5–8 pass predictions (AOS/LOS times and max elevation)
-- Auto-refreshes every 30 seconds
-- Persistent configuration (saved in flash memory)
-- Extremely low power — perfect for always-on desk or field use
+- **Sky Plot** with azimuth lines and current satellite position (only shown when above the horizon)
+- **Next 3 Passes** with accurate UTC AOS/LOS times and maximum elevation
+- **Dynamic Refresh Rate**:
+  - Updates every **15 seconds** when the satellite is visible
+  - Updates every **60 seconds** when the satellite is below the horizon (reduces e-ink wear)
+- **Full Screen Refresh** on every update for reliable e-ink rendering
+- **On-Device Configuration**:
+  - Enter observer location using **Maidenhead grid square**
+  - Enter **Latitude / Longitude** manually
+  - Select from popular satellites or enter any **custom NORAD ID**
+  - WiFi configuration via captive portal
+- Fetches TLE data from the **AMSAT** `nasabare.txt` source
+- Battery percentage and status display
+- Clean, minimal interface optimized for e-ink
 
 ## Hardware Requirements
 
-- **M5Paper S3** (ESP32-S3 + 4.7" 960×540 e-ink display)
-- Optional: MicroSD card (for future logging features)
-
-## Software Requirements (Arduino IDE)
-
-### Board Support
-1. Open **File → Preferences**
-2. Add the following URL to **Additional Boards Manager URLs**:
-`https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/arduino/package_m5stack_index.json`
-3. Go to **Tools → Board → Boards Manager** and install **M5Stack**
-4. Select board: **M5PaperS3**
-
-### Required Libraries (via Library Manager)
-- **M5Unified** (≥ 0.2.5)
-- **M5GFX** (≥ 0.2.7)
-- **WiFiManager** by tzapu
-- **SparkFun SGP4** (or Hopperpop SGP4 library)
+- **M5Paper S3** (or compatible M5Stack device running M5Unified)
+- Arduino IDE with the following libraries installed:
+  - `M5Unified`
+  - `M5GFX`
+  - `WiFiManager`
+  - `Preferences`
+  - `HTTPClient` (built-in)
+  - `Sgp4` (SparkFun SGP4 Arduino Library)
 
 ## Installation
 
-1. Clone or download the repository
-2. Open PaperSat.ino in the Arduino IDE
-3. Select Tools → Board → M5Stack → M5PaperS3
-4. Choose the correct USB port
-5. Upload the sketch (long-press the power button on the M5Paper S3 if it doesn’t enter download mode automatically)  
+1. Install the required libraries via the Arduino Library Manager.
+2. Clone or download this repository.
+3. Open `PaperSat.ino` in the Arduino IDE.
+4. Select your board (**M5PaperS3** or equivalent) and upload the sketch.
+5. On first boot, use the **Setup** menu to configure WiFi and your location.
 
-## First Boot and Setup
+## Usage
 
-1. After uploading, tap the Setup button on the main screen  
-2. Connect your phone or computer to the WiFi network: M5PaperS3-Setup  
-3. Open the captive portal in your browser  
-4. Enter your 6-character Maidenhead grid square (e.g. FN31pr) or latitude and longitude  
-5. Optionally enter any NORAD ID  
-6. Save — the device will reconnect to your home WiFi  
-7. The display will now auto-update every 30 seconds  
+### Main Screen
+- Displays current satellite position on the sky plot (when above horizon)
+- Shows the next 3 passes with AOS/LOS times and max elevation
+- Battery level and last TLE update time are shown at the bottom
 
-## Author
+### Select Satellite
+- Choose from a curated list of popular satellites commonly found in the AMSAT TLE file
+- Or select **Custom NORAD ID** to track any satellite available in the AMSAT TLE file.
 
-Paul Stoetzer, N8HM  
-Executive Vice President  
-AMSAT  
+### Setup Menu
+- **Enter Maidenhead Grid** — Quick location entry
+- **Enter Lat / Lon** — Precise coordinate entry
+- **Custom NORAD ID** — Track any satellite by catalog number
+- **WiFi Configuration** — Opens a captive portal to enter WiFi credentials
+
+## Configuration
+
+PaperSat stores settings (location and selected satellite) in non-volatile memory using the `Preferences` library. Settings persist across reboots.
+
+## Credits
+
+- **Author**: Paul Stoetzer, N8HM
+- Built with the excellent [M5Unified](https://github.com/m5stack/M5Unified) library
+- Orbital calculations powered by the [SGP4](https://github.com/SparkFun/SparkFun_SGP4_Arduino_Library) library
+- TLE data sourced from [AMSAT](https://www.amsat.org/)
 
 ## License
 
-This project is licensed under the MIT License — see the LICENSE file for details.  
+This project is released under the **MIT License**.
 
-## Acknowledgments  
+---
 
-• Celestrak for public TLE data  
-• SGP4 algorithm by Dr. T.S. Kelso  
-• M5Stack hardware and libraries  
-• WiFiManager and Arduino open-source community  
-
+**Note**: This project is optimized for the M5Paper S3 e-ink display. Performance and appearance may vary on other devices.
