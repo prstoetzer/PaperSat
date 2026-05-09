@@ -50,10 +50,15 @@ String statusMsg = "Booting...";
 
 // ====================== FORWARD DECLARATIONS ======================
 void drawMainScreen();
+void drawDegreeSymbol(int16_t x, int16_t y);
 
 // ====================== HELPER ======================
 time_t jdToUnix(double jd) {
   return (jd - 2440587.5) * 86400.0;
+}
+
+void drawDegreeSymbol(int16_t x, int16_t y) {
+  M5.Display.fillCircle(x + 3, y + 4, 3, TFT_BLACK);
 }
 
 // ====================== MAIDENHEAD ======================
@@ -246,18 +251,18 @@ void drawMainScreen() {
     drawSatelliteIcon(px, py, 18);
   }
 
-  // Azimuth + Elevation with proper degree symbol
+  // Azimuth + Elevation with drawn degree symbol
   char buf[32];
   sprintf(buf, "Az: %.1f", sat.satAz);
   M5.Display.drawString(buf, 20, 510);
   int x = 20 + M5.Display.textWidth(buf);
-  M5.Display.drawString("\xB0", x, 510);
+  drawDegreeSymbol(x, 510);
 
   sprintf(buf, "   El: %.1f", sat.satEl);
-  x = x + M5.Display.textWidth("\xB0") + 6;
+  x = x + 14; // space after degree circle
   M5.Display.drawString(buf, x, 510);
   x = x + M5.Display.textWidth(buf);
-  M5.Display.drawString("\xB0", x, 510);
+  drawDegreeSymbol(x, 510);
 
   // Next 3 Passes - Lower Right
   M5.Display.setTextSize(2);
@@ -271,7 +276,7 @@ void drawMainScreen() {
             aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
     M5.Display.drawString(line, 620, 380 + i*38);
     int px = 620 + M5.Display.textWidth(line);
-    M5.Display.drawString("\xB0", px, 380 + i*38);
+    drawDegreeSymbol(px, 380 + i*38);
   }
 
   if (lastTLEFetch > 0) {
