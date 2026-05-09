@@ -51,7 +51,7 @@ String statusMsg = "Booting...";
 // ====================== FORWARD DECLARATIONS ======================
 void drawMainScreen();
 
-// ====================== HELPER: Julian Date to Unix time ======================
+// ====================== HELPER ======================
 time_t jdToUnix(double jd) {
   return (jd - 2440587.5) * 86400.0;
 }
@@ -204,23 +204,21 @@ bool wasTouched(int x, int y, int w, int h) {
   return (t.x >= x && t.x <= x + w && t.y >= y && t.y <= y + h);
 }
 
-// ====================== SATELLITE ICON (simple square dot) ======================
+// ====================== SATELLITE ICON ======================
 void drawSatelliteIcon(int x, int y, int size) {
   M5.Display.fillRect(x - size/2, y - size/2, size, size, TFT_BLACK);
 }
 
-// ====================== MAIN SCREEN (FULL REFRESH ONLY) ======================
+// ====================== MAIN SCREEN ======================
 void drawMainScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextColor(TFT_BLACK);
 
-  // Title
   M5.Display.setTextSize(3);
   M5.Display.drawString("PaperSat", 20, 15);
   M5.Display.setTextSize(2);
   M5.Display.drawString(selectedName.c_str(), 20, 55);
 
-  // Sky plot with azimuth lines
   int cx = 380, cy = 280, r = 190;
   M5.Display.drawCircle(cx, cy, r, TFT_BLACK);
   M5.Display.drawCircle(cx, cy, r/2, TFT_BLACK);
@@ -240,7 +238,6 @@ void drawMainScreen() {
   M5.Display.drawString("E", cx+r+12, cy-8);
   M5.Display.drawString("W", cx-r-38, cy-8);
 
-  // Satellite position (only if above horizon)
   if (sat.satEl > 0) {
     double az = sat.satAz * PI / 180.0;
     double eln = (90.0 - sat.satEl) / 90.0;
@@ -253,7 +250,7 @@ void drawMainScreen() {
   sprintf(pos, "Az: %.1f°   El: %.1f°", sat.satAz, sat.satEl);
   M5.Display.drawString(pos, 20, 510);
 
-  // Next Passes - Lower Right Corner (below menu buttons)
+  // Next 3 Passes - Lower Right
   M5.Display.setTextSize(2);
   M5.Display.drawString("Next Passes (UTC):", 620, 340);
 
@@ -266,7 +263,6 @@ void drawMainScreen() {
     M5.Display.drawString(line, 620, 380 + i*38);
   }
 
-  // Status + TLE age
   if (lastTLEFetch > 0) {
     unsigned long ageMin = (millis() - lastTLEFetch) / 60000;
     char ageStr[30];
@@ -275,7 +271,6 @@ void drawMainScreen() {
   }
   M5.Display.drawString(statusMsg.c_str(), 20, 480);
 
-  // Time + Battery
   struct tm timeinfo;
   getLocalTime(&timeinfo);
   char ts[15];
@@ -286,20 +281,17 @@ void drawMainScreen() {
   sprintf(bat, "%d%%", getBatteryPercent());
   M5.Display.drawString(bat, 760, 20);
 
-  // Buttons
   M5.Display.drawRoundRect(720, 100, 200, 55, 8, TFT_BLACK);
   M5.Display.drawString("Refresh", 755, 115);
-
   M5.Display.drawRoundRect(720, 180, 200, 55, 8, TFT_BLACK);
   M5.Display.drawString("Select Sat", 740, 195);
-
   M5.Display.drawRoundRect(720, 260, 200, 55, 8, TFT_BLACK);
   M5.Display.drawString("Setup", 770, 275);
 
   M5.Display.display();
 }
 
-// ====================== SAT SELECT ======================
+// ====================== OTHER SCREENS ======================
 void drawSatSelectScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
@@ -320,7 +312,6 @@ void drawSatSelectScreen() {
   M5.Display.display();
 }
 
-// ====================== SETUP MENU ======================
 void drawSetupMenu() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
@@ -335,7 +326,6 @@ void drawSetupMenu() {
   M5.Display.display();
 }
 
-// ====================== INPUT SCREENS ======================
 void drawCustomNoradScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
@@ -411,6 +401,7 @@ void handleTouch() {
       if (wasTouched(20, y, 620, 48)) {
         selectedName = satList[i].name;
         selectedNorad = satList[i].norad;
+        lastTLEFetch = 0;                    // ← Force fresh TLE download
         saveConfig();
         currentScreen = MAIN;
         updateData();
@@ -440,6 +431,7 @@ void handleTouch() {
       if (inputBuffer.length() > 0) {
         selectedNorad = inputBuffer;
         selectedName = "NORAD " + inputBuffer;
+        lastTLEFetch = 0;                    // ← Force fresh TLE download
         saveConfig();
       }
       currentScreen = MAIN;
