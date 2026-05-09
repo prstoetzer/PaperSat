@@ -7,11 +7,11 @@
 #include <time.h>
 
 // ====================== CONFIG ======================
-double qth_lat = 40.7128;
-double qth_lon = -74.0060;
+double qth_lat = 38.8626;
+double qth_lon = -77.0562;
 double qth_alt = 10.0;
 
-String selectedName = "ISS (Zarya)";
+String selectedName = "ISS";
 String selectedNorad = "25544";
 
 struct Satellite {
@@ -19,11 +19,11 @@ struct Satellite {
   const char* norad;
 };
 Satellite satList[] = {
-  {"ISS (Zarya)", "25544"},
-  {"Tiangong CSS", "48274"},
-  {"AO-91 (Fox-1B)", "43017"},
-  {"Hubble", "20580"},
-  {"NOAA-20", "44432"}
+  {"ISS", "25544"},
+  {"SO-50", "27607"},
+  {"AO-91", "43017"},
+  {"AO-7", "07530"},
+  {"RS-44", "44909"}
 };
 const int satCount = sizeof(satList) / sizeof(satList[0]);
 
@@ -77,7 +77,7 @@ void loadConfig() {
   qth_lat = prefs.getDouble("lat", 40.7128);
   qth_lon = prefs.getDouble("lon", -74.0060);
   selectedNorad = prefs.getString("norad", "25544");
-  selectedName = prefs.getString("name", "ISS (Zarya)");
+  selectedName = prefs.getString("name", "ISS");
   prefs.end();
 }
 
@@ -247,7 +247,7 @@ void drawMainScreen() {
   }
 
   char pos[60];
-  sprintf(pos, "Az: %.1f°   El: %.1f°", sat.satAz, sat.satEl);
+  sprintf(pos, "Az: %.1f%c   El: %.1f%c", sat.satAz, 0xB0, sat.satEl, 0xB0);
   M5.Display.drawString(pos, 20, 510);
 
   // Next 3 Passes - Lower Right
@@ -258,8 +258,8 @@ void drawMainScreen() {
     struct tm *aos = gmtime(&passes[i].aos);
     struct tm *los = gmtime(&passes[i].los);
     char line[80];
-    sprintf(line, "%02d:%02d → %02d:%02d  %.1f°", 
-            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
+    sprintf(line, "%02d:%02d -> %02d:%02d  %.1f%c", 
+            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl, 0xB0);
     M5.Display.drawString(line, 620, 380 + i*38);
   }
 
@@ -291,7 +291,7 @@ void drawMainScreen() {
   M5.Display.display();
 }
 
-// ====================== OTHER SCREENS ======================
+// ====================== OTHER SCREENS (unchanged) ======================
 void drawSatSelectScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
@@ -401,7 +401,7 @@ void handleTouch() {
       if (wasTouched(20, y, 620, 48)) {
         selectedName = satList[i].name;
         selectedNorad = satList[i].norad;
-        lastTLEFetch = 0;                    // ← Force fresh TLE download
+        lastTLEFetch = 0;
         saveConfig();
         currentScreen = MAIN;
         updateData();
@@ -431,7 +431,7 @@ void handleTouch() {
       if (inputBuffer.length() > 0) {
         selectedNorad = inputBuffer;
         selectedName = "NORAD " + inputBuffer;
-        lastTLEFetch = 0;                    // ← Force fresh TLE download
+        lastTLEFetch = 0;
         saveConfig();
       }
       currentScreen = MAIN;
