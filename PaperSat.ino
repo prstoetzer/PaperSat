@@ -21,10 +21,9 @@ struct Satellite {
 Satellite satList[] = {
   {"ISS (Zarya)", "25544"},
   {"Tiangong CSS", "48274"},
+  {"AO-91 (Fox-1B)", "43017"},
   {"Hubble", "20580"},
-  {"NOAA-20", "44432"},
-  {"Sentinel-1A", "39634"},
-  {"Landsat 8", "39084"}
+  {"NOAA-20", "44432"}
 };
 const int satCount = sizeof(satList) / sizeof(satList[0]);
 
@@ -32,6 +31,7 @@ Sgp4 sat;
 Preferences prefs;
 
 char currentTLE1[80], currentTLE2[80];
+unsigned long lastTLEFetch = 0;
 
 struct Pass {
   time_t aos, los;
@@ -41,13 +41,20 @@ Pass passes[8];
 int passCount = 0;
 
 unsigned long lastUpdate = 0;
-const unsigned long UPDATE_INTERVAL = 10000;  // 10 seconds
 
 enum Screen { MAIN, SAT_SELECT, SETUP_MENU, GRID_INPUT, LATLON_INPUT, CUSTOM_NORAD };
 Screen currentScreen = MAIN;
 
 String inputBuffer = "";
 String statusMsg = "Booting...";
+
+// ====================== FORWARD DECLARATIONS ======================
+void drawMainScreen();
+
+// ====================== HELPER: Julian Date to Unix time ======================
+time_t jdToUnix(double jd) {
+  return (jd - 2440587.5) * 86400.0;
+}
 
 // ====================== MAIDENHEAD ======================
 void gridToLatLon(const char* mgrid, double &lat, double &lon) {
@@ -83,26 +90,67 @@ void saveConfig() {
   prefs.end();
 }
 
-// ====================== TLE & ORBIT ======================
+// ====================== TLE from AMSAT ======================
 bool fetchTLE() {
-  statusMsg = "Fetching TLE...";
+  if (millis() - lastTLEFetch < 86400000UL && lastTLEFetch != 0) {
+    statusMsg = "Using cached TLE";
+    return true;
+  }
+
+  statusMsg = "Downloading AMSAT TLEs...";
+  drawMainScreen();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    statusMsg = "WiFi not connected";
+    return false;
+  }
+
   HTTPClient http;
-  String url = "https://celestrak.org/NORAD/elements/gp.php?CATNR=" + selectedNorad + "&FORMAT=TLE";
-  http.begin(url);
+  http.begin("https://www.amsat.org/tle/current/nasabare.txt");
+  http.setTimeout(20000);
+
   int code = http.GET();
+
   if (code == HTTP_CODE_OK) {
     String payload = http.getString();
-    int idx = payload.indexOf('\n');
-    if (idx > 0) {
-      payload.substring(0, idx).toCharArray(currentTLE1, 80);
-      payload.substring(idx + 1).toCharArray(currentTLE2, 80);
-      http.end();
-      statusMsg = "TLE Loaded";
-      return true;
+    http.end();
+
+    int searchPos = 0;
+    while (searchPos < payload.length()) {
+      int line1Start = payload.indexOf("\n1 ", searchPos);
+      if (line1Start == -1) break;
+
+      int line1End = payload.indexOf('\n', line1Start + 1);
+      if (line1End == -1) line1End = payload.length();
+
+      String line1 = payload.substring(line1Start + 1, line1End);
+      line1.trim();
+
+      if (line1.indexOf(selectedNorad) != -1) {
+        int line2Start = line1End + 1;
+        int line2End = payload.indexOf('\n', line2Start);
+        if (line2End == -1) line2End = payload.length();
+
+        String line2 = payload.substring(line2Start, line2End);
+        line2.trim();
+
+        line1.toCharArray(currentTLE1, 80);
+        line2.toCharArray(currentTLE2, 80);
+
+        statusMsg = "TLE Loaded from AMSAT";
+        lastTLEFetch = millis();
+        return true;
+      }
+
+      searchPos = line1End + 1;
     }
+
+    statusMsg = "Satellite not found in AMSAT file";
+    return false;
   }
+
   http.end();
-  statusMsg = "TLE Failed";
+  statusMsg = "AMSAT download failed (Code: " + String(code) + ")";
   return false;
 }
 
@@ -112,8 +160,8 @@ void predictPasses() {
   sat.initpredpoint((unsigned long)time(nullptr), 0);
   while (passCount < 8) {
     if (sat.nextpass(&p, 20, false, 5.0)) {
-      passes[passCount].aos = p.jdstart;
-      passes[passCount].los = p.jdstop;
+      passes[passCount].aos   = jdToUnix(p.jdstart);
+      passes[passCount].los   = jdToUnix(p.jdstop);
       passes[passCount].maxEl = p.maxelevation;
       passCount++;
     } else break;
@@ -126,8 +174,9 @@ void updateCurrentPosition() {
 
 void updateData() {
   if (WiFi.status() != WL_CONNECTED) {
-    statusMsg = "WiFi disconnected";
-    return;
+    statusMsg = "WiFi disconnected - retrying...";
+    WiFi.begin();
+    delay(1500);
   }
   if (fetchTLE()) {
     sat.init(selectedName.c_str(), currentTLE1, currentTLE2);
@@ -155,15 +204,78 @@ bool wasTouched(int x, int y, int w, int h) {
   return (t.x >= x && t.x <= x + w && t.y >= y && t.y <= y + h);
 }
 
-// ====================== MAIN SCREEN ======================
+// ====================== SATELLITE ICON (simple square dot) ======================
+void drawSatelliteIcon(int x, int y, int size) {
+  M5.Display.fillRect(x - size/2, y - size/2, size, size, TFT_BLACK);
+}
+
+// ====================== MAIN SCREEN (FULL REFRESH ONLY) ======================
 void drawMainScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextColor(TFT_BLACK);
-  M5.Display.setTextSize(2);
 
-  M5.Display.drawString("PaperSat", 20, 20);
+  // Title
+  M5.Display.setTextSize(3);
+  M5.Display.drawString("PaperSat", 20, 15);
+  M5.Display.setTextSize(2);
   M5.Display.drawString(selectedName.c_str(), 20, 55);
 
+  // Sky plot with azimuth lines
+  int cx = 380, cy = 280, r = 190;
+  M5.Display.drawCircle(cx, cy, r, TFT_BLACK);
+  M5.Display.drawCircle(cx, cy, r/2, TFT_BLACK);
+
+  for (int i = 0; i < 8; i++) {
+    float angle = i * 45.0 * PI / 180.0;
+    int x1 = cx + (int)(r * 0.2 * sin(angle));
+    int y1 = cy - (int)(r * 0.2 * cos(angle));
+    int x2 = cx + (int)(r * sin(angle));
+    int y2 = cy - (int)(r * cos(angle));
+    M5.Display.drawLine(x1, y1, x2, y2, TFT_BLACK);
+  }
+
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("N", cx-8, cy-r-28);
+  M5.Display.drawString("S", cx-8, cy+r+8);
+  M5.Display.drawString("E", cx+r+12, cy-8);
+  M5.Display.drawString("W", cx-r-38, cy-8);
+
+  // Satellite position (only if above horizon)
+  if (sat.satEl > 0) {
+    double az = sat.satAz * PI / 180.0;
+    double eln = (90.0 - sat.satEl) / 90.0;
+    int px = cx + (int)(r * eln * sin(az));
+    int py = cy - (int)(r * eln * cos(az));
+    drawSatelliteIcon(px, py, 18);
+  }
+
+  char pos[60];
+  sprintf(pos, "Az: %.1f°   El: %.1f°", sat.satAz, sat.satEl);
+  M5.Display.drawString(pos, 20, 510);
+
+  // Next Passes - Lower Right Corner (below menu buttons)
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("Next Passes (UTC):", 620, 340);
+
+  for (int i = 0; i < passCount && i < 3; i++) {
+    struct tm *aos = gmtime(&passes[i].aos);
+    struct tm *los = gmtime(&passes[i].los);
+    char line[80];
+    sprintf(line, "%02d:%02d → %02d:%02d  %.1f°", 
+            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
+    M5.Display.drawString(line, 620, 380 + i*38);
+  }
+
+  // Status + TLE age
+  if (lastTLEFetch > 0) {
+    unsigned long ageMin = (millis() - lastTLEFetch) / 60000;
+    char ageStr[30];
+    sprintf(ageStr, "TLE updated %lumin ago", ageMin);
+    M5.Display.drawString(ageStr, 20, 450);
+  }
+  M5.Display.drawString(statusMsg.c_str(), 20, 480);
+
+  // Time + Battery
   struct tm timeinfo;
   getLocalTime(&timeinfo);
   char ts[15];
@@ -174,39 +286,15 @@ void drawMainScreen() {
   sprintf(bat, "%d%%", getBatteryPercent());
   M5.Display.drawString(bat, 760, 20);
 
-  int cx = 380, cy = 280, r = 190;
-  M5.Display.drawCircle(cx, cy, r, TFT_BLACK);
-  M5.Display.drawCircle(cx, cy, r/2, TFT_BLACK);
-  M5.Display.drawString("N", cx-10, cy-r-25);
-  M5.Display.drawString("S", cx-10, cy+r+5);
-  M5.Display.drawString("E", cx+r+10, cy-10);
-  M5.Display.drawString("W", cx-r-35, cy-10);
+  // Buttons
+  M5.Display.drawRoundRect(720, 100, 200, 55, 8, TFT_BLACK);
+  M5.Display.drawString("Refresh", 755, 115);
 
-  double az = sat.satAz * PI / 180.0;
-  double eln = (90.0 - sat.satEl) / 90.0;
-  int px = cx + (int)(r * eln * sin(az));
-  int py = cy - (int)(r * eln * cos(az));
-  M5.Display.fillCircle(px, py, 12, TFT_RED);
+  M5.Display.drawRoundRect(720, 180, 200, 55, 8, TFT_BLACK);
+  M5.Display.drawString("Select Sat", 740, 195);
 
-  char pos[60];
-  sprintf(pos, "Az: %.1f°  El: %.1f°", sat.satAz, sat.satEl);
-  M5.Display.drawString(pos, 20, 510);
-
-  M5.Display.drawString("Next Passes (UTC):", 20, 120);
-  for (int i = 0; i < passCount && i < 5; i++) {
-    struct tm *aos = gmtime(&passes[i].aos);
-    struct tm *los = gmtime(&passes[i].los);
-    char line[80];
-    sprintf(line, "%02d:%02d → %02d:%02d  %.1f°", 
-            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
-    M5.Display.drawString(line, 20, 160 + i*38);
-  }
-
-  M5.Display.drawString(statusMsg.c_str(), 20, 480);
-
-  M5.Display.drawRect(720, 100, 200, 55, TFT_BLACK); M5.Display.drawString("Refresh", 750, 115);
-  M5.Display.drawRect(720, 180, 200, 55, TFT_BLACK); M5.Display.drawString("Select Sat", 735, 195);
-  M5.Display.drawRect(720, 260, 200, 55, TFT_BLACK); M5.Display.drawString("Setup", 765, 275);
+  M5.Display.drawRoundRect(720, 260, 200, 55, 8, TFT_BLACK);
+  M5.Display.drawString("Setup", 770, 275);
 
   M5.Display.display();
 }
@@ -289,7 +377,7 @@ void drawGridInputScreen() {
 void drawLatLonInputScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
-  M5.Display.drawString("Enter Lat,Lon", 20, 20);
+  M5.Display.drawString("Enter Lat,Lon (e.g. 40.7128,-74.0060)", 20, 20);
   M5.Display.drawString(inputBuffer.c_str(), 40, 80);
 
   const char* numKeys[] = {"7","8","9","4","5","6","1","2","3","0",".","-","+"};
@@ -450,9 +538,13 @@ void loop() {
   M5.update();
   handleTouch();
 
-  if (currentScreen == MAIN && millis() - lastUpdate > UPDATE_INTERVAL) {
-    updateData();
-    drawMainScreen();
+  if (currentScreen == MAIN) {
+    unsigned long currentInterval = (sat.satEl > 0) ? 15000 : 60000;
+
+    if (millis() - lastUpdate > currentInterval) {
+      updateData();
+      drawMainScreen();
+    }
   }
   delay(50);
 }
