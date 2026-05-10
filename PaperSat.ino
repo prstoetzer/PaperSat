@@ -53,12 +53,12 @@ void drawMainScreen();
 void drawDegreeSymbol(int16_t x, int16_t y);
 
 // ====================== HELPER ======================
-time_t jdToUnix(double jd) {
-  return (jd - 2440587.5) * 86400.0;
-}
-
 void drawDegreeSymbol(int16_t x, int16_t y) {
   M5.Display.fillCircle(x + 3, y + 4, 3, TFT_BLACK);
+}
+
+time_t jdToUnix(double jd) {
+  return (jd - 2440587.5) * 86400.0;
 }
 
 // ====================== MAIDENHEAD ======================
@@ -161,20 +161,62 @@ bool fetchTLE() {
 
 void predictPasses() {
   passCount = 0;
+  sat.site(qth_lat, qth_lon, qth_alt);
+
   passinfo p;
-  sat.initpredpoint((unsigned long)time(nullptr), 0);
+  // Use library's pass finder (reliable for detecting passes, maxEl, and LOS/jdstop)
+  // but compute AOS manually from the peak because library jdstart is buggy for some sats like RS-44
+  sat.initpredpoint((unsigned long)time(nullptr), 0.0);
 
   while (passCount < 8) {
-    if (sat.nextpass(&p, 20, false, 5.0)) {
-      // Only accept real passes (at least ~60 seconds long)
-      if (p.jdstop > p.jdstart + (60.0 / 86400.0)) {
-        passes[passCount].aos   = jdToUnix(p.jdstart);
-        passes[passCount].los   = jdToUnix(p.jdstop);
+    if (!sat.nextpass(&p, 40, false, 0.0)) {
+      break; // no more passes found
+    }
+    // Only accept passes with reasonable max elevation and valid stop > max time
+    if (p.maxelevation > 0.5 && p.jdstop > p.jdmax) {
+      // Library provides good p.jdmax, p.jdstop (LOS), p.maxelevation
+      // Ignore p.jdstart (often wrongly equals LOS or peak time)
+      time_t peakTime = jdToUnix(p.jdmax);
+      time_t losTimeLib = jdToUnix(p.jdstop);
+
+      // Manually find AOS by searching backward from peak until elevation drops to <=0
+      time_t aosTime = peakTime;
+      const long COARSE_BACK_SEC = 30;
+      bool crossedBelow = false;
+      for (long back = 0; back < 2 * 3600; back += COARSE_BACK_SEC) { // search up to 2 hours back
+        time_t tt = peakTime - back;
+        if (tt < time(nullptr) - 3600) break;
+        sat.findsat((unsigned long)tt);
+        if (sat.satEl <= 0.0) {
+          aosTime = tt;
+          crossedBelow = true;
+          break;
+        }
+      }
+      if (!crossedBelow) {
+        continue; // couldn't find AOS, skip this pass
+      }
+
+      // Refine AOS: step forward from the rough below point to find first time El > 0
+      time_t refinedAOS = aosTime;
+      for (int d = 0; d < 120; ++d) { // up to 2 minutes refine window
+        time_t tt = aosTime + d;
+        sat.findsat((unsigned long)tt);
+        if (sat.satEl > 0.0) {
+          refinedAOS = tt;
+          break;
+        }
+      }
+
+      // Use library's LOS (confirmed correct by user) and maxEl
+      time_t refinedLOS = losTimeLib;
+
+      if (refinedLOS > refinedAOS + 30) {
+        passes[passCount].aos = refinedAOS;
+        passes[passCount].los = refinedLOS;
         passes[passCount].maxEl = p.maxelevation;
         passCount++;
       }
-    } else {
-      break;
     }
   }
 }
@@ -272,14 +314,17 @@ void drawMainScreen() {
 
   // Next 3 Passes - Lower Right
   M5.Display.setTextSize(2);
+  // Clear the passes list area to ensure clean e-ink update (prevents ghosting of old text)
+  M5.Display.fillRect(620, 340, 340, 130, TFT_WHITE);
   M5.Display.drawString("Next Passes (UTC):", 620, 340);
 
   for (int i = 0; i < passCount && i < 3; i++) {
-    struct tm *aos = gmtime(&passes[i].aos);
-    struct tm *los = gmtime(&passes[i].los);
+    struct tm aos_tm = *gmtime(&passes[i].aos);
+    struct tm los_tm = *gmtime(&passes[i].los);
     char line[80];
-    sprintf(line, "%02d:%02d -> %02d:%02d  %.1f", 
-            aos->tm_hour, aos->tm_min, los->tm_hour, los->tm_min, passes[i].maxEl);
+    sprintf(line, "%02d:%02d:%02d -> %02d:%02d:%02d  %.1f", 
+            aos_tm.tm_hour, aos_tm.tm_min, aos_tm.tm_sec,
+            los_tm.tm_hour, los_tm.tm_min, los_tm.tm_sec, passes[i].maxEl);
     M5.Display.drawString(line, 620, 380 + i*38);
     int px = 620 + M5.Display.textWidth(line);
     drawDegreeSymbol(px, 380 + i*38);
