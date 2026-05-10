@@ -5,7 +5,9 @@
 #include <HTTPClient.h>
 #include <Sgp4.h>
 #include <time.h>
+#include <sys/time.h>
 #include <math.h>
+#include <LittleFS.h>
 
 // ====================== CONFIG ======================
 double qth_lat = 38.8626;
@@ -16,23 +18,20 @@ String selectedName = "ISS";
 String selectedNorad = "25544";
 
 struct Satellite {
-  const char* name;
-  const char* norad;
+  char name[25];
+  char norad[10];
 };
-Satellite satList[] = {
-  {"ISS", "25544"},
-  {"SO-50", "27607"},
-  {"AO-91", "43017"},
-  {"AO-7", "07530"},
-  {"RS-44", "44909"}
-};
-const int satCount = sizeof(satList) / sizeof(satList[0]);
+Satellite satList[200];
+int satCount = 0;
+int currentSatPage = 0;
+const int satsPerPage = 10;
 
 Sgp4 sat;
 Preferences prefs;
 
 char currentTLE1[80], currentTLE2[80];
 unsigned long lastTLEFetch = 0;
+time_t lastTLETime = 0;
 
 struct Pass {
   time_t aos, los;
@@ -43,7 +42,7 @@ int passCount = 0;
 
 unsigned long lastUpdate = 0;
 
-enum Screen { MAIN, SAT_SELECT, SETUP_MENU, GRID_INPUT, LATLON_INPUT, CUSTOM_NORAD };
+enum Screen { MAIN, SAT_SELECT, SETUP_MENU, GRID_INPUT, LATLON_INPUT, TIME_INPUT };
 Screen currentScreen = MAIN;
 
 String inputBuffer = "";
@@ -60,6 +59,24 @@ void drawDegreeSymbol(int16_t x, int16_t y) {
 
 time_t jdToUnix(double jd) {
   return (jd - 2440587.5) * 86400.0;
+}
+
+void setSystemTime(int year, int mon, int day, int hour, int min, int sec) {
+  struct tm t;
+  t.tm_year = year - 1900;
+  t.tm_mon = mon - 1;
+  t.tm_mday = day;
+  t.tm_hour = hour;
+  t.tm_min = min;
+  t.tm_sec = sec;
+  t.tm_isdst = 0;
+  time_t epoch = mktime(&t);
+  if (epoch != (time_t)-1) {
+    struct timeval tv;
+    tv.tv_sec = epoch;
+    tv.tv_usec = 0;
+    settimeofday(&tv, NULL);
+  }
 }
 
 // ====================== MAIDENHEAD ======================
@@ -84,6 +101,7 @@ void loadConfig() {
   qth_lon = prefs.getDouble("lon", -74.0060);
   selectedNorad = prefs.getString("norad", "25544");
   selectedName = prefs.getString("name", "ISS");
+  lastTLETime = prefs.getULong("lastTLE", 0);
   prefs.end();
 }
 
@@ -96,67 +114,127 @@ void saveConfig() {
   prefs.end();
 }
 
-// ====================== TLE from AMSAT ======================
-bool fetchTLE() {
-  if (millis() - lastTLEFetch < 86400000UL && lastTLEFetch != 0) {
-    statusMsg = "Using cached TLE";
-    return true;
-  }
+// ====================== TLE from AMSAT (with local LittleFS cache) ======================
+bool parseTLEPayload(const String& payload) {
+  satCount = 0;
+  bool foundSelected = false;
+  int searchPos = 0;
+  while (searchPos < payload.length() && satCount < 200) {
+    int line1Start = payload.indexOf("\n1 ", searchPos);
+    if (line1Start == -1) break;
 
-  statusMsg = "Downloading AMSAT TLEs...";
-  drawMainScreen();
+    int nameStart = payload.lastIndexOf('\n', line1Start - 1) + 1;
+    if (nameStart < 0) nameStart = 0;
+    String nameStr = payload.substring(nameStart, line1Start);
+    nameStr.trim();
 
-  if (WiFi.status() != WL_CONNECTED) {
-    statusMsg = "WiFi not connected";
-    return false;
-  }
+    int line1End = payload.indexOf('\n', line1Start + 1);
+    if (line1End == -1) line1End = payload.length();
+    String line1 = payload.substring(line1Start + 1, line1End);
+    line1.trim();
 
-  HTTPClient http;
-  http.begin("https://www.amsat.org/tle/current/nasabare.txt");
-  http.setTimeout(20000);
+    String noradStr = line1.substring(2, 7);
+    noradStr.trim();
 
-  int code = http.GET();
+    if (nameStr.length() > 0 && noradStr.length() > 0 && satCount < 200) {
+      nameStr.toCharArray(satList[satCount].name, sizeof(satList[satCount].name));
+      noradStr.toCharArray(satList[satCount].norad, sizeof(satList[satCount].norad));
 
-  if (code == HTTP_CODE_OK) {
-    String payload = http.getString();
-    http.end();
-
-    int searchPos = 0;
-    while (searchPos < payload.length()) {
-      int line1Start = payload.indexOf("\n1 ", searchPos);
-      if (line1Start == -1) break;
-
-      int line1End = payload.indexOf('\n', line1Start + 1);
-      if (line1End == -1) line1End = payload.length();
-
-      String line1 = payload.substring(line1Start + 1, line1End);
-      line1.trim();
-
-      if (line1.indexOf(selectedNorad) != -1) {
+      if (noradStr == selectedNorad) {
+        line1.toCharArray(currentTLE1, 80);
         int line2Start = line1End + 1;
         int line2End = payload.indexOf('\n', line2Start);
         if (line2End == -1) line2End = payload.length();
-
         String line2 = payload.substring(line2Start, line2End);
         line2.trim();
-
-        line1.toCharArray(currentTLE1, 80);
         line2.toCharArray(currentTLE2, 80);
+        foundSelected = true;
+      }
+      satCount++;
+    }
+    searchPos = line1End + 1;
+  }
+  return foundSelected || (satCount > 0);
+}
 
-        statusMsg = "TLE Loaded from AMSAT";
+bool fetchTLE() {
+  bool haveLocal = LittleFS.exists("/nasabare.txt");
+  time_t now = time(nullptr);
+
+  bool needDownload = false;
+  if (!haveLocal) {
+    needDownload = true;
+  } else if (WiFi.status() == WL_CONNECTED && (lastTLETime == 0 || (now > 1609459200LL && (now - lastTLETime > 86400)))) {
+    needDownload = true;
+  }
+
+  if (needDownload && WiFi.status() == WL_CONNECTED) {
+    statusMsg = "Downloading AMSAT TLEs...";
+    drawMainScreen();
+
+    HTTPClient http;
+    http.begin("https://www.amsat.org/tle/current/nasabare.txt");
+    http.setTimeout(20000);
+    int code = http.GET();
+
+    if (code == HTTP_CODE_OK) {
+      String payload = http.getString();
+      http.end();
+
+      // Save to local LittleFS for offline use
+      File f = LittleFS.open("/nasabare.txt", "w");
+      if (f) {
+        f.print(payload);
+        f.close();
+      }
+
+      lastTLEFetch = millis();
+      if (now > 1609459200LL) {
+        lastTLETime = now;
+        prefs.begin("sattracker", false);
+        prefs.putULong("lastTLE", (unsigned long)lastTLETime);
+        prefs.end();
+      } else {
+        lastTLETime = 1;  // non-zero sentinel (RAM only); prevents repeated downloads in this session while time invalid; not persisted so boot will retry
+      }
+
+      if (parseTLEPayload(payload)) {
+        statusMsg = "TLE updated from AMSAT";
+        return true;
+      } else {
+        statusMsg = "TLE parse failed after download";
+        return false;
+      }
+    } else {
+      http.end();
+      statusMsg = "Download failed (code " + String(code) + "), using local...";
+      // fall through to local load
+    }
+  }
+
+  // Fallback / normal path: load from local file (allows offline operation with old data)
+  if (haveLocal) {
+    File f = LittleFS.open("/nasabare.txt", "r");
+    if (f) {
+      String payload = f.readString();
+      f.close();
+      if (parseTLEPayload(payload)) {
+        if (needDownload) {
+          statusMsg = "Using local TLE (update failed)";
+        } else {
+          statusMsg = "Using cached local TLE";
+        }
         lastTLEFetch = millis();
         return true;
       }
-
-      searchPos = line1End + 1;
     }
-
-    statusMsg = "Satellite not found in AMSAT file";
-    return false;
   }
 
-  http.end();
-  statusMsg = "AMSAT download failed (Code: " + String(code) + ")";
+  if (WiFi.status() != WL_CONNECTED && !haveLocal) {
+    statusMsg = "No Wifi & No local TLE";
+  } else {
+    statusMsg = "No TLE data available";
+  }
   return false;
 }
 
@@ -276,6 +354,7 @@ void drawMainScreen() {
   int cx = 380, cy = 280, r = 190;
   M5.Display.drawCircle(cx, cy, r, TFT_BLACK);
   M5.Display.drawCircle(cx, cy, r/2, TFT_BLACK);
+  M5.Display.drawCircle(cx, cy, 18, TFT_BLACK);  // small center circle for zenith / refined appearance
 
   for (int i = 0; i < 8; i++) {
     float angle = i * 45.0 * PI / 180.0;
@@ -373,13 +452,13 @@ void drawMainScreen() {
         int dy = pyf - py;
         double len = sqrt(dx * dx + dy * dy);
         if (len > 3.0) {
-          double scale = 20.0 / len;
+          double scale = 25.0 / len;
           int ax = px + (int)(dx * scale);
           int ay = py + (int)(dy * scale);
           M5.Display.drawLine(px, py, ax, ay, TFT_BLACK);
           // Simple arrow head
           double angle = atan2(dy, dx);
-          double asz = 6.0;
+          double asz = 11.0;  // slightly larger arrowhead for visibility
           int hx1 = ax - (int)(asz * cos(angle - 0.4));
           int hy1 = ay - (int)(asz * sin(angle - 0.4));
           int hx2 = ax - (int)(asz * cos(angle + 0.4));
@@ -458,18 +537,33 @@ void drawSatSelectScreen() {
   M5.Display.setTextSize(2);
   M5.Display.drawString("Select Satellite", 20, 20);
 
-  for (int i = 0; i < satCount; i++) {
-    int y = 80 + i * 55;
-    M5.Display.drawRect(20, y, 620, 48, TFT_BLACK);
-    M5.Display.drawString(satList[i].name, 40, y + 12);
+  int startIdx = currentSatPage * satsPerPage;
+  int numOnPage = (satsPerPage < (satCount - startIdx) ? satsPerPage : (satCount - startIdx));
+  for (int j = 0; j < numOnPage; j++) {
+    int i = startIdx + j;
+    int y = 60 + j * 40;
+    M5.Display.drawRect(20, y, 620, 36, TFT_BLACK);
+    M5.Display.drawString(satList[i].name, 40, y + 10);
   }
 
-  int customY = 80 + satCount * 55;
-  M5.Display.drawRect(20, customY, 620, 48, TFT_BLACK);
-  M5.Display.drawString("Custom NORAD ID...", 40, customY + 12);
+  // Page navigation on right side (if multiple pages)
+  int totalPages = (satCount + satsPerPage - 1) / satsPerPage;
+  if (totalPages > 1) {
+    char pageStr[20];
+    sprintf(pageStr, "Page %d/%d", currentSatPage + 1, totalPages);
+    M5.Display.drawString(pageStr, 720, 80);
+    if (currentSatPage > 0) {
+      M5.Display.drawRoundRect(720, 130, 200, 55, 8, TFT_BLACK);
+      M5.Display.drawString("Prev", 780, 145);
+    }
+    if (currentSatPage < totalPages - 1) {
+      M5.Display.drawRoundRect(720, 200, 200, 55, 8, TFT_BLACK);
+      M5.Display.drawString("Next", 780, 215);
+    }
+  }
 
-  M5.Display.drawRect(720, 420, 200, 60, TFT_BLACK);
-  M5.Display.drawString("Back", 760, 440);
+  M5.Display.drawRect(720, 470, 200, 55, TFT_BLACK);
+  M5.Display.drawString("Back", 760, 488);
   M5.Display.display();
 }
 
@@ -480,36 +574,17 @@ void drawSetupMenu() {
 
   M5.Display.drawRect(20, 80, 620, 55, TFT_BLACK); M5.Display.drawString("Enter Maidenhead Grid", 40, 92);
   M5.Display.drawRect(20, 160, 620, 55, TFT_BLACK); M5.Display.drawString("Enter Lat / Lon", 40, 172);
-  M5.Display.drawRect(20, 240, 620, 55, TFT_BLACK); M5.Display.drawString("Custom NORAD ID", 40, 252);
-  M5.Display.drawRect(20, 320, 620, 55, TFT_BLACK); M5.Display.drawString("WiFi Configuration", 40, 332);
+  M5.Display.drawRect(20, 240, 620, 55, TFT_BLACK); M5.Display.drawString("WiFi Configuration", 40, 252);
+  M5.Display.drawRect(20, 320, 620, 55, TFT_BLACK); M5.Display.drawString("Set Time/Date (UTC)", 40, 332);
 
   M5.Display.drawRect(720, 420, 200, 60, TFT_BLACK); M5.Display.drawString("Back", 760, 440);
-  M5.Display.display();
-}
-
-void drawCustomNoradScreen() {
-  M5.Display.clearDisplay();
-  M5.Display.setTextSize(2);
-  M5.Display.drawString("Enter NORAD ID", 20, 20);
-  M5.Display.drawString(inputBuffer.c_str(), 40, 80);
-
-  const char* numKeys[] = {"1","2","3","4","5","6","7","8","9","0"};
-  for (int i = 0; i < 10; i++) {
-    int x = 100 + (i % 5) * 80;
-    int y = 160 + (i / 5) * 70;
-    M5.Display.drawRect(x, y, 70, 60, TFT_BLACK);
-    M5.Display.drawString(numKeys[i], x + 28, y + 18);
-  }
-
-  M5.Display.drawRect(720, 160, 200, 60, TFT_BLACK); M5.Display.drawString("Done", 760, 175);
-  M5.Display.drawRect(720, 260, 200, 60, TFT_BLACK); M5.Display.drawString("Back", 760, 275);
   M5.Display.display();
 }
 
 void drawGridInputScreen() {
   M5.Display.clearDisplay();
   M5.Display.setTextSize(2);
-  M5.Display.drawString("Enter Maidenhead Grid", 20, 20);
+  M5.Display.drawString("Enter Maidenhead Grid (4 or 6 chars)", 20, 20);
   M5.Display.drawString(inputBuffer.c_str(), 40, 80);
 
   const char* keys[] = {"A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","0","1","2","3","4","5","6","7","8","9"};
@@ -544,6 +619,39 @@ void drawLatLonInputScreen() {
   M5.Display.display();
 }
 
+void drawTimeInputScreen() {
+  M5.Display.clearDisplay();
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("Set UTC Time/Date", 20, 20);
+  M5.Display.drawString("Format: YYYY-MM-DD HH:MM:SS or T", 20, 50);
+  M5.Display.drawString(inputBuffer.c_str(), 40, 80);
+
+  const char* timeKeys[] = {
+    "1", "2", "3", "4", "5",
+    "6", "7", "8", "9", "0",
+    "-", "T", ":", "Del", "Clr"
+  };
+  for (int i = 0; i < 15; i++) {
+    int col = i % 5;
+    int row = i / 5;
+    int x = 40 + col * 105;
+    int y = 150 + row * 55;
+    int w = 95;
+    int h = 48;
+    M5.Display.drawRect(x, y, w, h, TFT_BLACK);
+    const char* label = timeKeys[i];
+    if (strcmp(label, "Del") == 0 || strcmp(label, "Clr") == 0) {
+      M5.Display.drawString(label, x + 15, y + 14);
+    } else {
+      M5.Display.drawString(label, x + 30, y + 14);
+    }
+  }
+
+  M5.Display.drawRect(720, 160, 200, 55, TFT_BLACK); M5.Display.drawString("Done", 760, 172);
+  M5.Display.drawRect(720, 240, 200, 55, TFT_BLACK); M5.Display.drawString("Back", 760, 252);
+  M5.Display.display();
+}
+
 // ====================== TOUCH HANDLER ======================
 void handleTouch() {
   if (!M5.Touch.getDetail().wasPressed()) return;
@@ -551,15 +659,36 @@ void handleTouch() {
 
   if (currentScreen == MAIN) {
     if (wasTouched(720, 100, 200, 55)) { updateData(); drawMainScreen(); }
-    else if (wasTouched(720, 180, 200, 55)) { currentScreen = SAT_SELECT; drawSatSelectScreen(); }
+    else if (wasTouched(720, 180, 200, 55)) { currentSatPage = 0; currentScreen = SAT_SELECT; drawSatSelectScreen(); }
     else if (wasTouched(720, 260, 200, 55)) { currentScreen = SETUP_MENU; drawSetupMenu(); }
   }
   else if (currentScreen == SAT_SELECT) {
-    if (wasTouched(720, 420, 200, 60)) { currentScreen = MAIN; drawMainScreen(); return; }
+    if (wasTouched(720, 470, 200, 55)) { currentScreen = MAIN; drawMainScreen(); return; }
 
-    for (int i = 0; i < satCount; i++) {
-      int y = 80 + i * 55;
-      if (wasTouched(20, y, 620, 48)) {
+    // Page navigation
+    if (wasTouched(720, 130, 200, 55)) { // Prev
+      if (currentSatPage > 0) {
+        currentSatPage--;
+        drawSatSelectScreen();
+        return;
+      }
+    }
+    if (wasTouched(720, 200, 200, 55)) { // Next
+      int totalPages = (satCount + satsPerPage - 1) / satsPerPage;
+      if (currentSatPage < totalPages - 1) {
+        currentSatPage++;
+        drawSatSelectScreen();
+        return;
+      }
+    }
+
+    // Sat list items on current page
+    int startIdx = currentSatPage * satsPerPage;
+    int numOnPage = (satsPerPage < (satCount - startIdx) ? satsPerPage : (satCount - startIdx));
+    for (int j = 0; j < numOnPage; j++) {
+      int i = startIdx + j;
+      int y = 60 + j * 40;
+      if (wasTouched(20, y, 620, 36)) {
         selectedName = satList[i].name;
         selectedNorad = satList[i].norad;
         lastTLEFetch = 0;
@@ -570,46 +699,14 @@ void handleTouch() {
         return;
       }
     }
-    int customY = 80 + satCount * 55;
-    if (wasTouched(20, customY, 620, 48)) {
-      inputBuffer = "";
-      currentScreen = CUSTOM_NORAD;
-      drawCustomNoradScreen();
-      return;
-    }
   }
   else if (currentScreen == SETUP_MENU) {
     if (wasTouched(720, 420, 200, 60)) { currentScreen = MAIN; drawMainScreen(); return; }
 
     if (wasTouched(20, 80, 620, 55)) { currentScreen = GRID_INPUT; inputBuffer = ""; drawGridInputScreen(); }
     else if (wasTouched(20, 160, 620, 55)) { currentScreen = LATLON_INPUT; inputBuffer = ""; drawLatLonInputScreen(); }
-    else if (wasTouched(20, 240, 620, 55)) { currentScreen = CUSTOM_NORAD; inputBuffer = ""; drawCustomNoradScreen(); }
-    else if (wasTouched(20, 320, 620, 55)) { openSetupPortal(); }
-  }
-  else if (currentScreen == CUSTOM_NORAD) {
-    if (wasTouched(720, 260, 200, 60)) { currentScreen = SETUP_MENU; drawSetupMenu(); return; }
-    if (wasTouched(720, 160, 200, 60)) {
-      if (inputBuffer.length() > 0) {
-        selectedNorad = inputBuffer;
-        selectedName = "NORAD " + inputBuffer;
-        lastTLEFetch = 0;
-        saveConfig();
-      }
-      currentScreen = MAIN;
-      updateData();
-      drawMainScreen();
-      return;
-    }
-    const char* numKeys[] = {"1","2","3","4","5","6","7","8","9","0"};
-    for (int i = 0; i < 10; i++) {
-      int x = 100 + (i % 5) * 80;
-      int y = 160 + (i / 5) * 70;
-      if (wasTouched(x, y, 70, 60)) {
-        if (inputBuffer.length() < 8) inputBuffer += numKeys[i];
-        drawCustomNoradScreen();
-        return;
-      }
-    }
+    else if (wasTouched(20, 240, 620, 55)) { openSetupPortal(); }
+    else if (wasTouched(20, 320, 620, 55)) { currentScreen = TIME_INPUT; inputBuffer = ""; drawTimeInputScreen(); }
   }
   else if (currentScreen == GRID_INPUT) {
     if (wasTouched(720, 240, 200, 55)) { currentScreen = SETUP_MENU; drawSetupMenu(); return; }
@@ -659,6 +756,60 @@ void handleTouch() {
       }
     }
   }
+  else if (currentScreen == TIME_INPUT) {
+    if (wasTouched(720, 160, 200, 55)) { // Done
+      int y, m, d, h, mi, s = 0;
+      int n = sscanf(inputBuffer.c_str(), "%d-%d-%d %d:%d:%d", &y, &m, &d, &h, &mi, &s);
+      if (n < 6) {
+        n = sscanf(inputBuffer.c_str(), "%d-%d-%dT%d:%d:%d", &y, &m, &d, &h, &mi, &s);
+      }
+      if (n < 6) {
+        n = sscanf(inputBuffer.c_str(), "%d-%d-%d %d:%d", &y, &m, &d, &h, &mi);
+        if (n == 5) s = 0;
+      }
+      bool valid = false;
+      if (n >= 5 && y >= 2020 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31 &&
+          h >= 0 && h <= 23 && mi >= 0 && mi <= 59 && s >= 0 && s <= 59) {
+        setSystemTime(y, m, d, h, mi, s);
+        statusMsg = "Time set successfully (UTC)";
+        valid = true;
+      } else {
+        statusMsg = "Invalid format. Use YYYY-MM-DD HH:MM:SS";
+      }
+      currentScreen = MAIN;
+      updateData();
+      drawMainScreen();
+      return;
+    }
+    if (wasTouched(720, 240, 200, 55)) { // Back
+      currentScreen = SETUP_MENU; drawSetupMenu(); return;
+    }
+    const char* timeKeys[] = {
+      "1", "2", "3", "4", "5",
+      "6", "7", "8", "9", "0",
+      "-", "T", ":", "Del", "Clr"
+    };
+    for (int i = 0; i < 15; i++) {
+      int col = i % 5;
+      int row = i / 5;
+      int x = 40 + col * 105;
+      int y = 150 + row * 55;
+      int w = 95;
+      int h = 48;
+      if (wasTouched(x, y, w, h)) {
+        String k = timeKeys[i];
+        if (k == "Del") {
+          if (inputBuffer.length() > 0) inputBuffer.remove(inputBuffer.length() - 1);
+        } else if (k == "Clr") {
+          inputBuffer = "";
+        } else {
+          if (inputBuffer.length() < 19) inputBuffer += k;
+        }
+        drawTimeInputScreen();
+        return;
+      }
+    }
+  }
 }
 
 void openSetupPortal() {
@@ -678,6 +829,11 @@ void setup() {
   M5.Display.setRotation(1);
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_BLACK);
+
+  if (!LittleFS.begin()) {
+    // LittleFS mount failed; downloads will still work but no offline cache
+    statusMsg = "LittleFS mount failed";
+  }
 
   loadConfig();
   WiFi.begin();
