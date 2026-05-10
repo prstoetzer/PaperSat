@@ -42,6 +42,9 @@ int passCount = 0;
 
 unsigned long lastUpdate = 0;
 
+// Threshold for considering time(nullptr) valid (post 2021 to detect unset NTP time)
+const time_t TLE_TIME_VALID_THRESHOLD = 1609459200LL; // 2021-01-01 UTC
+
 enum Screen { MAIN, SAT_SELECT, SETUP_MENU, GRID_INPUT, LATLON_INPUT, TIME_INPUT };
 Screen currentScreen = MAIN;
 
@@ -160,12 +163,19 @@ bool parseTLEPayload(const String& payload) {
 bool fetchTLE() {
   bool haveLocal = LittleFS.exists("/nasabare.txt");
   time_t now = time(nullptr);
+  bool timeValid = (now > TLE_TIME_VALID_THRESHOLD);
 
   bool needDownload = false;
-  if (!haveLocal) {
-    needDownload = true;
-  } else if (WiFi.status() == WL_CONNECTED && (lastTLETime == 0 || (now > 1609459200LL && (now - lastTLETime > 86400)))) {
-    needDownload = true;
+  if (WiFi.status() == WL_CONNECTED) {
+    if (lastTLETime == 0 || (timeValid && (now - lastTLETime > 86400))) {
+      needDownload = true;
+    } else if (!haveLocal) {
+      // No local cache file persisted (e.g. LittleFS write issue); retry periodically (every ~1h)
+      // to acquire TLE data without hammering AMSAT server every 60s on repeated refresh
+      if (lastTLETime == 0 || (timeValid && (now - lastTLETime > 3600))) {
+        needDownload = true;
+      }
+    }
   }
 
   if (needDownload && WiFi.status() == WL_CONNECTED) {
@@ -189,7 +199,7 @@ bool fetchTLE() {
       }
 
       lastTLEFetch = millis();
-      if (now > 1609459200LL) {
+      if (now > TLE_TIME_VALID_THRESHOLD) {
         lastTLETime = now;
         prefs.begin("sattracker", false);
         prefs.putULong("lastTLE", (unsigned long)lastTLETime);
@@ -208,6 +218,15 @@ bool fetchTLE() {
     } else {
       http.end();
       statusMsg = "Download failed (code " + String(code) + "), using local...";
+      // Update timestamp even on failure (if time valid) to prevent hammering on repeated refresh attempts / failures
+      if (now > TLE_TIME_VALID_THRESHOLD) {
+        lastTLETime = now;
+        prefs.begin("sattracker", false);
+        prefs.putULong("lastTLE", (unsigned long)lastTLETime);
+        prefs.end();
+      } else {
+        lastTLETime = 1;  // non-zero sentinel (RAM only)
+      }
       // fall through to local load
     }
   }
@@ -831,8 +850,11 @@ void setup() {
   M5.Display.setTextColor(TFT_BLACK);
 
   if (!LittleFS.begin()) {
-    // LittleFS mount failed; downloads will still work but no offline cache
-    statusMsg = "LittleFS mount failed";
+    LittleFS.format();  // Attempt to recover corrupted or unformatted LittleFS
+    if (!LittleFS.begin()) {
+      // LittleFS mount failed; downloads will still work but no offline cache
+      statusMsg = "LittleFS mount failed";
+    }
   }
 
   loadConfig();
