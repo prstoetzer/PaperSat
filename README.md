@@ -4,8 +4,6 @@
 
 Designed for amateur radio operators (hams), visual satellite observers, educators, and space enthusiasts who need reliable tracking in the field or at home.
 
-![M5Paper S3 running PaperSat](https://via.placeholder.com/800x400?text=PaperSat+on+M5Paper+S3)  
-*(Add your own screenshots here!)*
 
 ## ✨ Key Features
 
