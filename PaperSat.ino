@@ -30,7 +30,6 @@ Sgp4 sat;
 Preferences prefs;
 
 char currentTLE1[80], currentTLE2[80];
-unsigned long lastTLEFetch = 0;
 time_t lastTLETime = 0;
 
 struct Pass {
@@ -198,7 +197,6 @@ bool fetchTLE() {
         f.close();
       }
 
-      lastTLEFetch = millis();
       if (now > TLE_TIME_VALID_THRESHOLD) {
         lastTLETime = now;
         prefs.begin("sattracker", false);
@@ -243,7 +241,6 @@ bool fetchTLE() {
         } else {
           statusMsg = "Using cached local TLE";
         }
-        lastTLEFetch = millis();
         return true;
       }
     }
@@ -522,10 +519,12 @@ void drawMainScreen() {
     drawDegreeSymbol(px, 380 + i*38);
   }
 
-  if (lastTLEFetch > 0) {
-    unsigned long ageMin = (millis() - lastTLEFetch) / 60000;
-    char ageStr[30];
-    sprintf(ageStr, "TLE updated %lumin ago", ageMin);
+  if (lastTLETime > TLE_TIME_VALID_THRESHOLD) {
+    struct tm t = *gmtime(&lastTLETime);
+    char ageStr[40];
+    sprintf(ageStr, "TLE updated %d/%d/%02d %02d:%02d UTC", 
+            t.tm_mon + 1, t.tm_mday, (t.tm_year + 1900) % 100,
+            t.tm_hour, t.tm_min);
     M5.Display.drawString(ageStr, 20, 450);
   }
   M5.Display.drawString(statusMsg.c_str(), 20, 480);
@@ -710,7 +709,6 @@ void handleTouch() {
       if (wasTouched(20, y, 620, 36)) {
         selectedName = satList[i].name;
         selectedNorad = satList[i].norad;
-        lastTLEFetch = 0;
         saveConfig();
         currentScreen = MAIN;
         updateData();
