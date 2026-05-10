@@ -31,6 +31,7 @@ Preferences prefs;
 
 char currentTLE1[80], currentTLE2[80];
 time_t lastTLETime = 0;
+bool forceTLEUpdate = false;
 
 struct Pass {
   time_t aos, los;
@@ -165,8 +166,10 @@ bool fetchTLE() {
   bool timeValid = (now > TLE_TIME_VALID_THRESHOLD);
 
   bool needDownload = false;
+  bool forceThisTime = forceTLEUpdate;
+  forceTLEUpdate = false;  // reset after this call
   if (WiFi.status() == WL_CONNECTED) {
-    if (lastTLETime == 0 || (timeValid && (now - lastTLETime > 86400))) {
+    if (forceThisTime || lastTLETime == 0 || (timeValid && (now - lastTLETime > 86400))) {
       needDownload = true;
     } else if (!haveLocal) {
       // No local cache file persisted (e.g. LittleFS write issue); retry periodically (every ~1h)
@@ -503,8 +506,8 @@ void drawMainScreen() {
 
   // Next 3 Passes - Lower Right
   M5.Display.setTextSize(2);
-  // Clear the passes list area to ensure clean e-ink update (prevents ghosting of old text)
-  M5.Display.fillRect(620, 340, 340, 130, TFT_WHITE);
+  // Clear the passes list area (including TLE msg below) to ensure clean e-ink update (prevents ghosting of old text)
+  M5.Display.fillRect(620, 340, 340, 160, TFT_WHITE);
   M5.Display.drawString("Next Passes (UTC):", 620, 340);
 
   for (int i = 0; i < passCount && i < 3; i++) {
@@ -519,13 +522,14 @@ void drawMainScreen() {
     drawDegreeSymbol(px, 380 + i*38);
   }
 
+  // TLE update timestamp - single line in lower right at same Y as Az/El readout (avoids polar plot overlap)
   if (lastTLETime > TLE_TIME_VALID_THRESHOLD) {
     struct tm t = *gmtime(&lastTLETime);
-    char ageStr[40];
-    sprintf(ageStr, "TLE updated %d/%d/%02d %02d:%02d UTC", 
-            t.tm_mon + 1, t.tm_mday, (t.tm_year + 1900) % 100,
+    char tleStr[50];
+    sprintf(tleStr, "TLE Updated %02d/%02d/%04d %02d:%02d UTC", 
+            t.tm_mon + 1, t.tm_mday, t.tm_year + 1900,
             t.tm_hour, t.tm_min);
-    M5.Display.drawString(ageStr, 20, 450);
+    M5.Display.drawString(tleStr, 620, 510);
   }
   M5.Display.drawString(statusMsg.c_str(), 20, 480);
 
@@ -579,6 +583,9 @@ void drawSatSelectScreen() {
       M5.Display.drawString("Next", 780, 215);
     }
   }
+
+  M5.Display.drawRoundRect(720, 280, 200, 55, 8, TFT_BLACK);
+  M5.Display.drawString("Update TLEs", 735, 295);
 
   M5.Display.drawRect(720, 470, 200, 55, TFT_BLACK);
   M5.Display.drawString("Back", 760, 488);
@@ -698,6 +705,13 @@ void handleTouch() {
         drawSatSelectScreen();
         return;
       }
+    }
+
+    if (wasTouched(720, 280, 200, 55)) { // Update TLEs - force redownload
+      forceTLEUpdate = true;
+      updateData();
+      drawSatSelectScreen();
+      return;
     }
 
     // Sat list items on current page
