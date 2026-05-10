@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <Sgp4.h>
 #include <time.h>
+#include <math.h>
 
 // ====================== CONFIG ======================
 double qth_lat = 38.8626;
@@ -291,12 +292,105 @@ void drawMainScreen() {
   M5.Display.drawString("E", cx+r+12, cy-8);
   M5.Display.drawString("W", cx-r-38, cy-8);
 
+  // Determine which pass to plot on the polar map
+  int passToPlot = -1;
+  if (passCount > 0) {
+    time_t now = time(nullptr);
+    if (sat.satEl > 0) {
+      // Find the current ongoing pass (may have AOS in past)
+      for (int i = 0; i < passCount; i++) {
+        if (passes[i].aos <= now && passes[i].los >= now) {
+          passToPlot = i;
+          break;
+        }
+      }
+    } else {
+      // Plot the next upcoming pass
+      passToPlot = 0;
+    }
+  }
+
+  // Draw path for current pass (if visible) or next pass (if not visible)
+  if (passToPlot >= 0) {
+    time_t startT = passes[passToPlot].aos;
+    time_t endT = passes[passToPlot].los;
+    long duration = endT - startT;
+    if (duration > 0) {
+      const int numPoints = 36;
+      long step = duration / (numPoints - 1);
+      if (step < 15) step = 15;
+      int prevX = -1, prevY = -1;
+      double savedAz = sat.satAz;
+      double savedEl = sat.satEl;
+      for (int i = 0; i < numPoints; i++) {
+        time_t t = startT + (long)i * step;
+        if (t > endT) t = endT;
+        sat.findsat((unsigned long)t);
+        if (sat.satEl > 0.0) {
+          double az = sat.satAz * PI / 180.0;
+          double eln = (90.0 - sat.satEl) / 90.0;
+          int px = cx + (int)(r * eln * sin(az));
+          int py = cy - (int)(r * eln * cos(az));
+          if (prevX >= 0) {
+            M5.Display.drawLine(prevX, prevY, px, py, TFT_BLACK);
+          }
+          prevX = px;
+          prevY = py;
+        } else {
+          prevX = -1;
+        }
+      }
+      // Restore current satellite position state
+      sat.satAz = savedAz;
+      sat.satEl = savedEl;
+    }
+  }
+
+  // Plot current satellite position (only if above horizon) with direction arrow
   if (sat.satEl > 0) {
     double az = sat.satAz * PI / 180.0;
     double eln = (90.0 - sat.satEl) / 90.0;
     int px = cx + (int)(r * eln * sin(az));
     int py = cy - (int)(r * eln * cos(az));
     drawSatelliteIcon(px, py, 18);
+
+    // Direction arrow: compute position ~45s ahead and draw arrow indicating travel direction
+    time_t nowT = time(nullptr);
+    time_t futureT = nowT + 45;
+    if (passToPlot >= 0 && passes[passToPlot].los < futureT + 10) {
+      futureT = passes[passToPlot].los - 5;
+    }
+    if (futureT > nowT + 5) {
+      double savedAz2 = sat.satAz;
+      double savedEl2 = sat.satEl;
+      sat.findsat((unsigned long)futureT);
+      if (sat.satEl > 0.0) {
+        double azf = sat.satAz * PI / 180.0;
+        double elnf = (90.0 - sat.satEl) / 90.0;
+        int pxf = cx + (int)(r * elnf * sin(azf));
+        int pyf = cy - (int)(r * elnf * cos(azf));
+        int dx = pxf - px;
+        int dy = pyf - py;
+        double len = sqrt(dx * dx + dy * dy);
+        if (len > 3.0) {
+          double scale = 20.0 / len;
+          int ax = px + (int)(dx * scale);
+          int ay = py + (int)(dy * scale);
+          M5.Display.drawLine(px, py, ax, ay, TFT_BLACK);
+          // Simple arrow head
+          double angle = atan2(dy, dx);
+          double asz = 6.0;
+          int hx1 = ax - (int)(asz * cos(angle - 0.4));
+          int hy1 = ay - (int)(asz * sin(angle - 0.4));
+          int hx2 = ax - (int)(asz * cos(angle + 0.4));
+          int hy2 = ay - (int)(asz * sin(angle + 0.4));
+          M5.Display.drawLine(ax, ay, hx1, hy1, TFT_BLACK);
+          M5.Display.drawLine(ax, ay, hx2, hy2, TFT_BLACK);
+        }
+      }
+      sat.satAz = savedAz2;
+      sat.satEl = savedEl2;
+    }
   }
 
   // Azimuth + Elevation with drawn degree symbol
