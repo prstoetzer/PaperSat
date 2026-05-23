@@ -828,6 +828,11 @@ void handleTouch() {
         selectedName = satList[i].name;
         selectedNorad = satList[i].norad;
         saveConfig();
+
+        // Clear old TLE so fetchTLE() will extract fresh one for the newly selected satellite
+        currentTLE1[0] = '\0';
+        currentTLE2[0] = '\0';
+
         currentScreen = MAIN;
         updateData();
         drawMainScreen();
