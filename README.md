@@ -4,6 +4,8 @@
 
 Designed for amateur radio operators (hams), visual satellite observers, educators, and space enthusiasts who need reliable portable tracking.
 
+![PaperSat Screenshot](PaperSat_MainScreen.png)
+
 ## ✨ Key Features
 
 ### 📡 Modern GP Data Support
