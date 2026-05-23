@@ -8,6 +8,7 @@
 #include <sys/time.h>
 #include <math.h>
 #include <LittleFS.h>
+#include <ArduinoJson.h>  // Install via Library Manager: "ArduinoJson" by Benoit Blanchon
 
 // ====================== CONFIG ======================
 double qth_lat = 38.8626;
@@ -98,6 +99,68 @@ void gridToLatLon(const char* mgrid, double &lat, double &lon) {
   }
 }
 
+void latLonToGrid(double lat, double lon, char* gridOut) {
+  // Normalize longitude to -180..180
+  lon = fmod(lon + 180.0, 360.0);
+  if (lon < 0) lon += 360.0;
+  lon -= 180.0;
+
+  lat = fmax(-90.0, fmin(90.0, lat));
+
+  int fieldLon = (int)((lon + 180.0) / 20.0);
+  int fieldLat = (int)((lat + 90.0) / 10.0);
+
+  double squareLon = fmod((lon + 180.0), 20.0) / 2.0;
+  double squareLat = fmod((lat + 90.0), 10.0);
+
+  int subsquareLon = (int)(squareLon * 12.0);
+  int subsquareLat = (int)(squareLat * 24.0);
+
+  gridOut[0] = 'A' + fieldLon;
+  gridOut[1] = 'A' + fieldLat;
+  gridOut[2] = '0' + (int)squareLon;
+  gridOut[3] = '0' + (int)squareLat;
+  gridOut[4] = 'a' + subsquareLon;
+  gridOut[5] = 'a' + subsquareLat;
+  gridOut[6] = '\0';
+}
+
+// ====================== WIFI GEOLOCATION ======================
+bool autoLocateViaWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    statusMsg = "WiFi not connected for location";
+    drawMainScreen();
+    return false;
+  }
+  HTTPClient http;
+  // ip-api.com is reliable, no key needed for moderate use, returns clean JSON
+  http.begin("http://ip-api.com/json/?fields=status,lat,lon,city,country");
+  http.setTimeout(12000);
+  int code = http.GET();
+  if (code == HTTP_CODE_OK) {
+    String payload = http.getString();
+    http.end();
+    DynamicJsonDocument doc(1536);
+    DeserializationError err = deserializeJson(doc, payload);
+    if (!err && doc["status"] == "success" && doc.containsKey("lat") && doc.containsKey("lon")) {
+      qth_lat = doc["lat"].as<double>();
+      qth_lon = doc["lon"].as<double>();
+      saveConfig();
+
+      char grid[7];
+      latLonToGrid(qth_lat, qth_lon, grid);
+      statusMsg = "WiFi Loc: " + String(grid);
+      drawMainScreen();
+      return true;
+    }
+  } else {
+    http.end();
+  }
+  statusMsg = "WiFi geolocation failed";
+  drawMainScreen();
+  return false;
+}
+
 void loadConfig() {
   prefs.begin("sattracker", true);
   qth_lat = prefs.getDouble("lat", 40.7128);
@@ -105,6 +168,8 @@ void loadConfig() {
   selectedNorad = prefs.getString("norad", "25544");
   selectedName = prefs.getString("name", "ISS");
   lastTLETime = prefs.getULong("lastTLE", 0);
+  prefs.getString("tle1", currentTLE1, sizeof(currentTLE1));
+  prefs.getString("tle2", currentTLE2, sizeof(currentTLE2));
   prefs.end();
 }
 
@@ -117,51 +182,78 @@ void saveConfig() {
   prefs.end();
 }
 
-// ====================== TLE from AMSAT (with local LittleFS cache) ======================
-bool parseTLEPayload(const String& payload) {
+// ====================== GP Data from AMSAT daily-bulletin.json (with Celestrak TLE fallback for SGP4) ======================
+bool parseGPJson(const String& payload) {
   satCount = 0;
-  bool foundSelected = false;
-  int searchPos = 0;
-  while (searchPos < payload.length() && satCount < 200) {
-    int line1Start = payload.indexOf("\n1 ", searchPos);
-    if (line1Start == -1) break;
+  DynamicJsonDocument doc(49152);  // Sufficient for ~89K daily-bulletin.json; uses PSRAM on M5Paper S3 if available
+  DeserializationError error = deserializeJson(doc, payload);
+  if (error) {
+    // JSON parse failed; could log but no Serial in normal run
+    return false;
+  }
 
-    int nameStart = payload.lastIndexOf('\n', line1Start - 1) + 1;
-    if (nameStart < 0) nameStart = 0;
-    String nameStr = payload.substring(nameStart, line1Start);
+  JsonArray sats;
+  if (doc.is<JsonArray>()) {
+    sats = doc.as<JsonArray>();
+  } else if (doc["satellites"].is<JsonArray>()) {
+    sats = doc["satellites"].as<JsonArray>();
+  } else if (doc["data"].is<JsonArray>()) {
+    sats = doc["data"].as<JsonArray>();
+  } else if (doc["GP"].is<JsonArray>()) {
+    sats = doc["GP"].as<JsonArray>();
+  } else if (doc["elements"].is<JsonArray>()) {
+    sats = doc["elements"].as<JsonArray>();
+  } else {
+    return false; // unknown structure
+  }
+
+  for (JsonObject s : sats) {
+    if (satCount >= 200) break;
+    const char* nameC = s["AMSAT_NAME"] | s["OBJECT_NAME"] | s["name"] | s["SATNAME"] | s["title"] | "";
+    const char* noradC = s["NORAD_CAT_ID"] | s["norad"] | s["CATNR"] | s["NORAD"] | s["id"] | "";
+    String nameStr(nameC);
+    String noradStr(noradC);
     nameStr.trim();
-
-    int line1End = payload.indexOf('\n', line1Start + 1);
-    if (line1End == -1) line1End = payload.length();
-    String line1 = payload.substring(line1Start + 1, line1End);
-    line1.trim();
-
-    String noradStr = line1.substring(2, 7);
     noradStr.trim();
-
-    if (nameStr.length() > 0 && noradStr.length() > 0 && satCount < 200) {
+    if (nameStr.length() > 0 && noradStr.length() > 0) {
       nameStr.toCharArray(satList[satCount].name, sizeof(satList[satCount].name));
       noradStr.toCharArray(satList[satCount].norad, sizeof(satList[satCount].norad));
 
+      // If this is the currently selected satellite, extract TLE directly from the AMSAT JSON
+      // so we don't need an extra call to Celestrak
       if (noradStr == selectedNorad) {
-        line1.toCharArray(currentTLE1, 80);
-        int line2Start = line1End + 1;
-        int line2End = payload.indexOf('\n', line2Start);
-        if (line2End == -1) line2End = payload.length();
-        String line2 = payload.substring(line2Start, line2End);
-        line2.trim();
-        line2.toCharArray(currentTLE2, 80);
-        foundSelected = true;
+        String tleStr = s["tle"] | "";
+        if (tleStr.length() > 20) {
+          // The "tle" field usually contains "0 NAME\n1 ....\n2 ...."
+          int firstNewline = tleStr.indexOf('\n');
+          if (firstNewline > 0) {
+            int secondNewline = tleStr.indexOf('\n', firstNewline + 1);
+            if (secondNewline > firstNewline) {
+              String line1 = tleStr.substring(firstNewline + 1, secondNewline);
+              String line2 = tleStr.substring(secondNewline + 1);
+              line1.trim();
+              line2.trim();
+              line1.toCharArray(currentTLE1, sizeof(currentTLE1));
+              line2.toCharArray(currentTLE2, sizeof(currentTLE2));
+
+              // Also save to Preferences for offline use
+              prefs.begin("sattracker", false);
+              prefs.putString("tle1", currentTLE1);
+              prefs.putString("tle2", currentTLE2);
+              prefs.end();
+            }
+          }
+        }
       }
+
       satCount++;
     }
-    searchPos = line1End + 1;
   }
-  return foundSelected || (satCount > 0);
+  return satCount > 0;
 }
 
 bool fetchTLE() {
-  bool haveLocal = LittleFS.exists("/nasabare.txt");
+  bool haveLocal = LittleFS.exists("/daily-bulletin.json");
   time_t now = time(nullptr);
   bool timeValid = (now > TLE_TIME_VALID_THRESHOLD);
 
@@ -173,7 +265,7 @@ bool fetchTLE() {
       needDownload = true;
     } else if (!haveLocal) {
       // No local cache file persisted (e.g. LittleFS write issue); retry periodically (every ~1h)
-      // to acquire TLE data without hammering AMSAT server every 60s on repeated refresh
+      // to acquire GP data without hammering AMSAT server every 60s on repeated refresh
       if (lastTLETime == 0 || (timeValid && (now - lastTLETime > 3600))) {
         needDownload = true;
       }
@@ -181,20 +273,20 @@ bool fetchTLE() {
   }
 
   if (needDownload && WiFi.status() == WL_CONNECTED) {
-    statusMsg = "Downloading AMSAT TLEs...";
+    statusMsg = "Downloading AMSAT GP data...";
     drawMainScreen();
 
     HTTPClient http;
-    http.begin("https://www.amsat.org/tle/current/nasabare.txt");
-    http.setTimeout(20000);
+    http.begin("https://newark192.amsat.org/gpdata/current/daily-bulletin.json");
+    http.setTimeout(25000);
     int code = http.GET();
 
     if (code == HTTP_CODE_OK) {
       String payload = http.getString();
       http.end();
 
-      // Save to local LittleFS for offline use
-      File f = LittleFS.open("/nasabare.txt", "w");
+      // Save to local LittleFS for offline use (the curated amateur satellite GP bulletin)
+      File f = LittleFS.open("/daily-bulletin.json", "w");
       if (f) {
         f.print(payload);
         f.close();
@@ -206,53 +298,64 @@ bool fetchTLE() {
         prefs.putULong("lastTLE", (unsigned long)lastTLETime);
         prefs.end();
       } else {
-        lastTLETime = 1;  // non-zero sentinel (RAM only); prevents repeated downloads in this session while time invalid; not persisted so boot will retry
+        lastTLETime = 1;  // non-zero sentinel (RAM only)
       }
 
-      if (parseTLEPayload(payload)) {
-        statusMsg = "TLE updated from AMSAT";
-        return true;
+      if (parseGPJson(payload)) {
+        // Successfully parsed satellite list + TLE directly from AMSAT GP bulletin.
+        // No Celestrak call is made (purely local parsing).
+        if (strlen(currentTLE1) > 60 && strlen(currentTLE2) > 60) {
+          struct tm t = *gmtime(&now);
+          char msg[50];
+          sprintf(msg, "GP Data %02d/%02d/%04d %02d:%02d UTC", 
+                  t.tm_mon + 1, t.tm_mday, t.tm_year + 1900,
+                  t.tm_hour, t.tm_min);
+          statusMsg = msg;
+          return true;
+        } else {
+          statusMsg = "GP list loaded but no TLE for selected satellite";
+          return (strlen(currentTLE1) > 10); // use cached TLE if available
+        }
       } else {
-        statusMsg = "TLE parse failed after download";
+        statusMsg = "GP JSON parse failed after download";
         return false;
       }
     } else {
       http.end();
       statusMsg = "Download failed (code " + String(code) + "), using local...";
-      // Update timestamp even on failure (if time valid) to prevent hammering on repeated refresh attempts / failures
       if (now > TLE_TIME_VALID_THRESHOLD) {
         lastTLETime = now;
         prefs.begin("sattracker", false);
         prefs.putULong("lastTLE", (unsigned long)lastTLETime);
         prefs.end();
       } else {
-        lastTLETime = 1;  // non-zero sentinel (RAM only)
+        lastTLETime = 1;
       }
       // fall through to local load
     }
   }
 
-  // Fallback / normal path: load from local file (allows offline operation with old data)
+  // Fallback / normal path: load from local JSON file (offline operation with last known GP list + cached TLE lines)
   if (haveLocal) {
-    File f = LittleFS.open("/nasabare.txt", "r");
+    File f = LittleFS.open("/daily-bulletin.json", "r");
     if (f) {
       String payload = f.readString();
       f.close();
-      if (parseTLEPayload(payload)) {
+      if (parseGPJson(payload)) {
         if (needDownload) {
-          statusMsg = "Using local TLE (update failed)";
+          statusMsg = "Using local GP data (update failed)";
         } else {
-          statusMsg = "Using cached local TLE";
+          statusMsg = "Using cached local GP data";
         }
-        return true;
+        return (strlen(currentTLE1) > 10);
       }
     }
   }
 
   if (WiFi.status() != WL_CONNECTED && !haveLocal) {
-    statusMsg = "No Wifi & No local TLE";
+    statusMsg = "No Wifi & No local GP data";
   } else {
-    statusMsg = "No TLE data available";
+    statusMsg = "No GP data available";
   }
   return false;
 }
@@ -522,11 +625,11 @@ void drawMainScreen() {
     drawDegreeSymbol(px, 380 + i*38);
   }
 
-  // TLE update timestamp - single line in lower right at same Y as Az/El readout (avoids polar plot overlap)
+  // GP data timestamp
   if (lastTLETime > TLE_TIME_VALID_THRESHOLD) {
     struct tm t = *gmtime(&lastTLETime);
     char tleStr[50];
-    sprintf(tleStr, "TLE Updated %02d/%02d/%04d %02d:%02d UTC", 
+    sprintf(tleStr, "GP Data %02d/%02d/%04d %02d:%02d UTC", 
             t.tm_mon + 1, t.tm_mday, t.tm_year + 1900,
             t.tm_hour, t.tm_min);
     M5.Display.drawString(tleStr, 620, 510);
@@ -585,7 +688,7 @@ void drawSatSelectScreen() {
   }
 
   M5.Display.drawRoundRect(720, 280, 200, 55, 8, TFT_BLACK);
-  M5.Display.drawString("Update TLEs", 735, 295);
+  M5.Display.drawString("Update GP", 745, 295);
 
   M5.Display.drawRect(720, 470, 200, 55, TFT_BLACK);
   M5.Display.drawString("Back", 760, 488);
@@ -600,9 +703,10 @@ void drawSetupMenu() {
   M5.Display.drawRect(20, 80, 620, 55, TFT_BLACK); M5.Display.drawString("Enter Maidenhead Grid", 40, 92);
   M5.Display.drawRect(20, 160, 620, 55, TFT_BLACK); M5.Display.drawString("Enter Lat / Lon", 40, 172);
   M5.Display.drawRect(20, 240, 620, 55, TFT_BLACK); M5.Display.drawString("WiFi Configuration", 40, 252);
-  M5.Display.drawRect(20, 320, 620, 55, TFT_BLACK); M5.Display.drawString("Set Time/Date (UTC)", 40, 332);
+  M5.Display.drawRect(20, 320, 620, 55, TFT_BLACK); M5.Display.drawString("Auto Location via WiFi", 40, 332);
+  M5.Display.drawRect(20, 400, 620, 55, TFT_BLACK); M5.Display.drawString("Set Time/Date (UTC)", 40, 412);
 
-  M5.Display.drawRect(720, 420, 200, 60, TFT_BLACK); M5.Display.drawString("Back", 760, 440);
+  M5.Display.drawRect(720, 480, 200, 55, TFT_BLACK); M5.Display.drawString("Back", 760, 498);
   M5.Display.display();
 }
 
@@ -707,7 +811,7 @@ void handleTouch() {
       }
     }
 
-    if (wasTouched(720, 280, 200, 55)) { // Update TLEs - force redownload
+    if (wasTouched(720, 280, 200, 55)) { // Update GP - force redownload of AMSAT daily-bulletin.json
       forceTLEUpdate = true;
       updateData();
       drawSatSelectScreen();
@@ -732,12 +836,13 @@ void handleTouch() {
     }
   }
   else if (currentScreen == SETUP_MENU) {
-    if (wasTouched(720, 420, 200, 60)) { currentScreen = MAIN; drawMainScreen(); return; }
+    if (wasTouched(720, 480, 200, 55)) { currentScreen = MAIN; drawMainScreen(); return; }
 
     if (wasTouched(20, 80, 620, 55)) { currentScreen = GRID_INPUT; inputBuffer = ""; drawGridInputScreen(); }
     else if (wasTouched(20, 160, 620, 55)) { currentScreen = LATLON_INPUT; inputBuffer = ""; drawLatLonInputScreen(); }
     else if (wasTouched(20, 240, 620, 55)) { openSetupPortal(); }
-    else if (wasTouched(20, 320, 620, 55)) { currentScreen = TIME_INPUT; inputBuffer = ""; drawTimeInputScreen(); }
+    else if (wasTouched(20, 320, 620, 55)) { autoLocateViaWiFi(); currentScreen = MAIN; drawMainScreen(); }
+    else if (wasTouched(20, 400, 620, 55)) { currentScreen = TIME_INPUT; inputBuffer = ""; drawTimeInputScreen(); }
   }
   else if (currentScreen == GRID_INPUT) {
     if (wasTouched(720, 240, 200, 55)) { currentScreen = SETUP_MENU; drawSetupMenu(); return; }
@@ -847,12 +952,27 @@ void openSetupPortal() {
   WiFiManager wm;
   wm.setConfigPortalTimeout(300);
   M5.Display.clearDisplay();
-  M5.Display.drawString("WiFi Setup Portal", 80, 120);
-  M5.Display.drawString("Connect to M5PaperS3-Setup", 40, 200);
+  M5.Display.setTextSize(2);
+  M5.Display.drawString("WiFi Setup Portal", 40, 80);
+  M5.Display.drawString("Connect to: M5PaperS3-Setup", 20, 140);
+  M5.Display.drawString("Then open 192.168.4.1 in browser", 10, 180);
+  M5.Display.setTextSize(1);
+  M5.Display.drawString("Portal will timeout after 5 minutes", 20, 220);
   M5.Display.display();
+
   wm.startConfigPortal("M5PaperS3-Setup");
-  WiFi.begin();
-  statusMsg = "WiFi Saved";
+
+  // Portal closed (credentials saved or timeout)
+  WiFi.begin();           // reconnect with new creds
+  delay(800);             // give WiFi a moment to connect
+
+  statusMsg = "WiFi credentials saved";
+  // Bonus: automatically set location from public IP now that we have internet
+  if (WiFi.status() == WL_CONNECTED) {
+    autoLocateViaWiFi();
+  }
+  currentScreen = MAIN;
+  drawMainScreen();
 }
 
 void setup() {
