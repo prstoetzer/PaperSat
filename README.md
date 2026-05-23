@@ -1,14 +1,14 @@
 # PaperSat 🛰️
 
-**PaperSat** is a fully self-contained satellite tracking application for the **M5Paper S3** e-ink tablet. It provides real-time orbital predictions, an intuitive polar sky plot, and on-device configuration using modern AMSAT GP data — all without requiring a phone, laptop, or constant internet connection after initial setup.
+**PaperSat** is a fully self-contained satellite tracking application for the **M5Paper S3** e-ink device. It provides real-time orbital predictions, an intuitive polar sky plot, and on-device configuration using modern AMSAT GP data — all without requiring a phone, laptop, or constant internet connection after initial setup.
 
 Designed for amateur radio operators (hams), visual satellite observers, educators, and space enthusiasts who need reliable portable tracking.
 
 ## ✨ Key Features
 
 ### 📡 Modern GP Data Support
-- Downloads and parses the official **AMSAT daily-bulletin.json**
-- Extracts both satellite list and TLE data directly from the JSON (no separate Celestrak calls required)
+- Downloads and parses the **AMSAT daily-bulletin.json**
+- Extracts both satellite list and TLE data directly from the JSON.
 - Future-proof for modern GP data formats
 
 ### 🌌 Advanced Polar Plot
@@ -23,13 +23,12 @@ Designed for amateur radio operators (hams), visual satellite observers, educato
 - Displays next 3 passes with:
   - AOS → LOS times (UTC with seconds)
   - Maximum elevation
-- Robust even on eccentric orbits (e.g. RS-44)
 
 ### 📍 On-Device Configuration
 - **6-character Maidenhead grid** input (or 4-character)
 - Manual latitude/longitude entry
 - **WiFi geolocation** — one-tap "Auto Location via WiFi" sets your QTH using a 6-character Maidenhead grid derived from your public IP
-- WiFi setup via built-in **WiFiManager** captive portal (cleanly returns to main screen)
+- WiFi setup via built-in **WiFiManager** captive portal
 - Manual UTC time/date setting
 
 ### 📴 Offline-First & Resilient
@@ -82,7 +81,7 @@ Install via Arduino IDE Library Manager:
 
 ## 🤝 Credits
 
-- **AMSAT** for providing the excellent daily GP bulletin
+- **AMSAT** for the daily GP bulletin
 - **SparkFun** for the SGP4 library
 - Built with **M5Unified** / **M5GFX** by M5Stack
 
