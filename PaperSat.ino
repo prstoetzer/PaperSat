@@ -182,7 +182,121 @@ void saveConfig() {
   prefs.end();
 }
 
-// ====================== GP Data from AMSAT daily-bulletin.json (with Celestrak TLE fallback for SGP4) ======================
+// ====================== GP ORBITAL ELEMENTS -> TLE ======================
+// AMSAT's daily-bulletin.json "tle" text field is being deprecated (the 5-digit
+// NORAD catalog runs out ~2026, after which new objects get 6-digit catalog
+// numbers that don't fit the TLE text format). The JSON still carries every
+// discrete GP/OMM orbital element, so we rebuild the two standard SGP4 TLE lines
+// from those fields. The reconstructed lines are byte-format-identical to the
+// classic AMSAT TLE the SGP4 library already accepts.
+
+// Standard TLE checksum over the first 68 columns: digits add their value,
+// a '-' adds 1, everything else adds 0; result mod 10.
+static char tleChecksum(const char* line) {
+  int sum = 0;
+  for (int i = 0; i < 68 && line[i]; i++) {
+    char c = line[i];
+    if (c >= '0' && c <= '9') sum += c - '0';
+    else if (c == '-') sum += 1;
+  }
+  return '0' + (sum % 10);
+}
+
+// Format a value into the 8-char TLE assumed-decimal exponential field used by
+// BSTAR and the 2nd derivative, e.g. 0.0001293 -> " 12930-3" (= .12930e-3).
+static void tleExpField(double value, char* out) {
+  if (value == 0.0 || !isfinite(value)) { strcpy(out, " 00000-0"); return; }
+  char sign = (value < 0) ? '-' : ' ';
+  double a = fabs(value);
+  int exp = 0;
+  while (a >= 1.0) { a /= 10.0; exp++; }
+  while (a < 0.1)  { a *= 10.0; exp--; }
+  long mant = lround(a * 100000.0);
+  if (mant >= 100000) { mant /= 10; exp++; }   // guard rounding overflow
+  sprintf(out, "%c%05ld%c%d", sign, mant, (exp < 0) ? '-' : '+', abs(exp));
+}
+
+// Convert "YYYY-MM-DD HH:MM:SS.ssssss" (also accepts the 'T' separator) into a
+// 2-digit epoch year and fractional day-of-year, as needed for TLE columns 19-32.
+static bool parseGPEpoch(const char* epoch, int &yy, double &doy) {
+  int Y, Mo, D, h, m; double s = 0.0;
+  int n = sscanf(epoch, "%d-%d-%d %d:%d:%lf", &Y, &Mo, &D, &h, &m, &s);
+  if (n < 6) n = sscanf(epoch, "%d-%d-%dT%d:%d:%lf", &Y, &Mo, &D, &h, &m, &s);
+  if (n < 5) return false;
+  static const int cum[12] = {0,31,59,90,120,151,181,212,243,273,304,334};
+  bool leap = (Y % 4 == 0 && (Y % 100 != 0 || Y % 400 == 0));
+  int day = cum[Mo - 1] + D + ((leap && Mo > 2) ? 1 : 0);
+  doy = (double)day + (h * 3600.0 + m * 60.0 + s) / 86400.0;
+  yy = Y % 100;
+  return true;
+}
+
+// Build standard TLE line1/line2 (NUL-terminated, 69 cols) from a GP JSON object.
+// Returns false if the mandatory elements are missing/invalid.
+static bool buildTLEFromGP(JsonObject s, char* tle1, char* tle2) {
+  const char* epochC = s["EPOCH"] | "";
+  if (strlen(epochC) < 10) return false;
+
+  int yy; double doy;
+  if (!parseGPEpoch(epochC, yy, doy)) return false;
+
+  double mm = s["MEAN_MOTION"].as<double>();
+  if (mm <= 0.0) return false;  // no usable elements
+
+  long catnum = s["NORAD_CAT_ID"].as<long>();
+  // SGP4 math never uses the catalog number; clamp to 5 cols so the fixed-width
+  // TLE layout stays valid even once 6-digit (100000+) catalog numbers appear.
+  long catCol = (catnum > 99999) ? (catnum % 100000) : catnum;
+
+  char cls = ((const char*)(s["CLASSIFICATION_TYPE"] | "U"))[0];
+  if (cls == 0) cls = 'U';
+  char eph = ((const char*)(s["EPHEMERIS_TYPE"] | "0"))[0];
+  if (eph == 0) eph = '0';
+
+  // International designator from OBJECT_ID "YYYY-NNNAAA" -> "YYNNNAAA" (8 cols).
+  char intl[9] = "        ";
+  const char* oid = s["OBJECT_ID"] | "";
+  const char* dash = strchr(oid, '-');
+  if (dash && (dash - oid) >= 4) {
+    char tmp[16];
+    snprintf(tmp, sizeof(tmp), "%c%c%s", oid[2], oid[3], dash + 1);
+    snprintf(intl, sizeof(intl), "%-8.8s", tmp);
+  }
+
+  double ndot    = s["MEAN_MOTION_DOT"].as<double>();
+  double ndotdot = s["MEAN_MOTION_DDOT"].as<double>();
+  double bstar   = s["BSTAR"].as<double>();
+  double incl    = s["INCLINATION"].as<double>();
+  double raan    = s["RA_OF_ASC_NODE"].as<double>();
+  double ecc     = s["ECCENTRICITY"].as<double>();
+  double argp    = s["ARG_OF_PERICENTER"].as<double>();
+  double ma      = s["MEAN_ANOMALY"].as<double>();
+  long   elset   = (long)(s["ELEMENT_SET_NO"] | 0.0);
+  long   revnum  = s["REV_AT_EPOCH"].as<long>() % 100000;
+
+  char ndotStr[16];
+  sprintf(ndotStr, "%c.%08ld", (ndot < 0) ? '-' : ' ', lround(fabs(ndot) * 1e8));
+  char ddotStr[10], bstarStr[10];
+  tleExpField(ndotdot, ddotStr);
+  tleExpField(bstar, bstarStr);
+
+  // ---- Line 1 (68-char body + checksum) ----
+  sprintf(tle1, "1 %5ld%c %-8s %02d%012.8f %s %s %s %c %4ld",
+          catCol, cls, intl, yy, doy, ndotStr, ddotStr, bstarStr, eph, elset);
+  tle1[68] = tleChecksum(tle1);
+  tle1[69] = '\0';
+
+  // ---- Line 2 (eccentricity is 7 digits with an assumed leading decimal) ----
+  long eccCol = lround(ecc * 1e7);
+  sprintf(tle2, "2 %5ld %8.4f %8.4f %07ld %8.4f %8.4f %11.8f%5ld",
+          catCol, incl, raan, eccCol, argp, ma, mm, revnum);
+  tle2[68] = tleChecksum(tle2);
+  tle2[69] = '\0';
+
+  return true;
+}
+
+// ====================== GP Data from AMSAT daily-bulletin.json (orbital elements -> TLE for SGP4) ======================
 bool parseGPJson(const String& payload) {
   satCount = 0;
   DynamicJsonDocument doc(49152);  // Sufficient for ~89K daily-bulletin.json; uses PSRAM on M5Paper S3 if available
@@ -219,30 +333,45 @@ bool parseGPJson(const String& payload) {
       nameStr.toCharArray(satList[satCount].name, sizeof(satList[satCount].name));
       noradStr.toCharArray(satList[satCount].norad, sizeof(satList[satCount].norad));
 
-      // If this is the currently selected satellite, extract TLE directly from the AMSAT JSON
-      // so we don't need an extra call to Celestrak
+      // If this is the currently selected satellite, build its TLE from the
+      // discrete GP orbital-element fields (MEAN_MOTION, ECCENTRICITY, EPOCH,
+      // INCLINATION, etc.) instead of the deprecated "tle" text field.
       if (noradStr == selectedNorad) {
-        String tleStr = s["tle"] | "";
-        if (tleStr.length() > 20) {
-          // The "tle" field usually contains "0 NAME\n1 ....\n2 ...."
-          int firstNewline = tleStr.indexOf('\n');
-          if (firstNewline > 0) {
-            int secondNewline = tleStr.indexOf('\n', firstNewline + 1);
-            if (secondNewline > firstNewline) {
-              String line1 = tleStr.substring(firstNewline + 1, secondNewline);
-              String line2 = tleStr.substring(secondNewline + 1);
-              line1.trim();
-              line2.trim();
-              line1.toCharArray(currentTLE1, sizeof(currentTLE1));
-              line2.toCharArray(currentTLE2, sizeof(currentTLE2));
+        char t1[80], t2[80];
+        bool built = buildTLEFromGP(s, t1, t2);
 
-              // Also save to Preferences for offline use
-              prefs.begin("sattracker", false);
-              prefs.putString("tle1", currentTLE1);
-              prefs.putString("tle2", currentTLE2);
-              prefs.end();
+        // Transitional fallback: if the GP element fields are absent but the
+        // legacy "tle" text field is still present, parse that instead.
+        if (!built) {
+          String tleStr = s["tle"] | "";
+          if (tleStr.length() > 20) {
+            int firstNewline = tleStr.indexOf('\n');
+            if (firstNewline > 0) {
+              int secondNewline = tleStr.indexOf('\n', firstNewline + 1);
+              if (secondNewline > firstNewline) {
+                String line1 = tleStr.substring(firstNewline + 1, secondNewline);
+                String line2 = tleStr.substring(secondNewline + 1);
+                line1.trim();
+                line2.trim();
+                line1.toCharArray(t1, sizeof(t1));
+                line2.toCharArray(t2, sizeof(t2));
+                built = (strlen(t1) > 60 && strlen(t2) > 60);
+              }
             }
           }
+        }
+
+        if (built) {
+          strncpy(currentTLE1, t1, sizeof(currentTLE1));
+          strncpy(currentTLE2, t2, sizeof(currentTLE2));
+          currentTLE1[sizeof(currentTLE1) - 1] = '\0';
+          currentTLE2[sizeof(currentTLE2) - 1] = '\0';
+
+          // Also save to Preferences for offline use
+          prefs.begin("sattracker", false);
+          prefs.putString("tle1", currentTLE1);
+          prefs.putString("tle2", currentTLE2);
+          prefs.end();
         }
       }
 
