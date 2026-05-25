@@ -10,7 +10,7 @@ Designed for amateur radio operators (hams), visual satellite observers, educato
 
 ### 📡 Modern GP Data Support
 - Downloads and parses the **AMSAT daily-bulletin.json**
-- Extracts both satellite list and TLE data directly from the JSON.
+- Extracts both satellite list and orbital elements directly from the JSON.
 - Future-proof for modern GP data formats
 
 ### 🌌 Advanced Polar Plot
