@@ -323,12 +323,28 @@ bool parseGPJson(const String& payload) {
 
   for (JsonObject s : sats) {
     if (satCount >= 200) break;
-    const char* nameC = s["AMSAT_NAME"] | s["OBJECT_NAME"] | s["name"] | s["SATNAME"] | s["title"] | "";
-    const char* noradC = s["NORAD_CAT_ID"] | s["norad"] | s["CATNR"] | s["NORAD"] | s["id"] | "";
-    String nameStr(nameC);
-    String noradStr(noradC);
-    nameStr.trim();
-    noradStr.trim();
+
+    // Look up the first non-empty value from a list of JSON keys, converting
+    // numeric values to their string form. AMSAT now serializes NORAD_CAT_ID as
+    // an integer rather than a quoted string, so reading it as const char* alone
+    // would silently yield "" and reject every satellite.
+    String nameStr, noradStr;
+    const char* nameKeys[]  = {"AMSAT_NAME", "OBJECT_NAME", "name", "SATNAME", "title"};
+    const char* noradKeys[] = {"NORAD_CAT_ID", "norad", "CATNR", "NORAD", "id"};
+    for (auto k : nameKeys) {
+      JsonVariant v = s[k];
+      if (v.isNull()) continue;
+      String out = v.as<String>();
+      out.trim();
+      if (out.length() > 0 && out != "null") { nameStr = out; break; }
+    }
+    for (auto k : noradKeys) {
+      JsonVariant v = s[k];
+      if (v.isNull()) continue;
+      String out = v.as<String>();
+      out.trim();
+      if (out.length() > 0 && out != "null") { noradStr = out; break; }
+    }
     if (nameStr.length() > 0 && noradStr.length() > 0) {
       nameStr.toCharArray(satList[satCount].name, sizeof(satList[satCount].name));
       noradStr.toCharArray(satList[satCount].norad, sizeof(satList[satCount].norad));
